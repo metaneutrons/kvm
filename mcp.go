@@ -33,9 +33,11 @@ const (
 	mcpClickHold   = 50 * time.Millisecond
 	mcpDoubleClick = 80 * time.Millisecond
 	mcpDragSteps   = 10
-	mcpMaxScroll   = 50
-	mcpMaxHold     = 5 * time.Second
-	absMouseMax    = 32767
+	// mcpDragNudge is about one pixel of a 1080p screen in absolute units.
+	mcpDragNudge = 16
+	mcpMaxScroll = 50
+	mcpMaxHold   = 5 * time.Second
+	absMouseMax  = 32767
 	// mcpDefaultScreenWidth is the widest screen the agent sees unless the
 	// client asks for another width. Larger video is scaled down to it, which
 	// keeps screenshots small and below the sizes at which clients scale
@@ -147,8 +149,10 @@ func newMCPServer(screen mcpScreen) *mcp.Server {
 		Annotations: mcpInput,
 	}, screen.drag)
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "scroll",
-		Description: "Move the mouse pointer to a screen position and turn the scroll wheel there.",
+		Name: "scroll",
+		Description: "Move the mouse pointer to a screen position and turn the scroll wheel there. " +
+			"Positive delta_y turns the wheel down, which scrolls down on Windows and Linux. macOS reverses it with natural scrolling, its default, " +
+			"so check the direction with a screenshot.",
 		Annotations: mcpInput,
 	}, screen.scroll)
 	mcp.AddTool(server, &mcp.Tool{
@@ -195,6 +199,14 @@ func newMCPServer(screen mcpScreen) *mcp.Server {
 }
 
 type mcpEmpty struct{}
+
+// mcpDone reports a completed action. An empty result is valid, but leaves
+// some clients and models unsure whether anything happened.
+func mcpDone(format string, args ...any) (*mcp.CallToolResult, any, error) {
+	return &mcp.CallToolResult{Content: []mcp.Content{
+		&mcp.TextContent{Text: fmt.Sprintf(format, args...)},
+	}}, nil, nil
+}
 
 type mcpRegion struct {
 	X      int `json:"x" jsonschema:"left edge in screen coordinates"`
@@ -363,7 +375,10 @@ func (s mcpScreen) moveMouse(_ context.Context, _ *mcp.CallToolRequest, in mcpPo
 	if err != nil {
 		return nil, nil, err
 	}
-	return nil, nil, rpcAbsMouseReport(x, y, 0)
+	if err := rpcAbsMouseReport(x, y, 0); err != nil {
+		return nil, nil, err
+	}
+	return mcpDone("Moved the pointer to %g,%g.", in.X, in.Y)
 }
 
 type mcpClickInput struct {
@@ -403,7 +418,18 @@ func (s mcpScreen) click(_ context.Context, _ *mcp.CallToolRequest, in mcpClickI
 			return nil, nil, err
 		}
 	}
-	return nil, nil, nil
+	action := "Clicked"
+	if in.Double {
+		action = "Double-clicked"
+	}
+	return mcpDone("%s the %s button at %g,%g.", action, buttonName(in.Button), in.X, in.Y)
+}
+
+func buttonName(name string) string {
+	if name == "" {
+		return "left"
+	}
+	return strings.ToLower(name)
 }
 
 type mcpDragInput struct {
@@ -435,6 +461,22 @@ func (s mcpScreen) drag(_ context.Context, _ *mcp.CallToolRequest, in mcpDragInp
 	if err := rpcAbsMouseReport(fromX, fromY, button); err != nil {
 		return nil, nil, err
 	}
+	// The host uses the first movement to start the drag and does not move
+	// the dragged object by it, so nudge by about a pixel before the path.
+	time.Sleep(mcpKeyDelay)
+	nudge := func(from, to int) int {
+		switch {
+		case to > from:
+			return from + mcpDragNudge
+		case to < from:
+			return from - mcpDragNudge
+		}
+		return from
+	}
+	if err := rpcAbsMouseReport(nudge(fromX, toX), nudge(fromY, toY), button); err != nil {
+		_ = rpcAbsMouseReport(fromX, fromY, 0)
+		return nil, nil, err
+	}
 	// Intermediate positions let the host recognize the movement as a drag.
 	for i := 1; i <= mcpDragSteps; i++ {
 		time.Sleep(mcpKeyDelay)
@@ -446,13 +488,16 @@ func (s mcpScreen) drag(_ context.Context, _ *mcp.CallToolRequest, in mcpDragInp
 		}
 	}
 	time.Sleep(mcpClickHold)
-	return nil, nil, rpcAbsMouseReport(toX, toY, 0)
+	if err := rpcAbsMouseReport(toX, toY, 0); err != nil {
+		return nil, nil, err
+	}
+	return mcpDone("Dragged with the %s button from %g,%g to %g,%g.", buttonName(in.Button), in.FromX, in.FromY, in.ToX, in.ToY)
 }
 
 type mcpScrollInput struct {
 	mcpPoint
-	DeltaY int `json:"delta_y,omitempty" jsonschema:"wheel notches, positive scrolls down"`
-	DeltaX int `json:"delta_x,omitempty" jsonschema:"wheel notches, positive scrolls right"`
+	DeltaY int `json:"delta_y,omitempty" jsonschema:"wheel notches, positive turns the wheel down (the host may reverse the scroll direction)"`
+	DeltaX int `json:"delta_x,omitempty" jsonschema:"wheel notches, positive turns the wheel right (the host may reverse the scroll direction)"`
 }
 
 func (s mcpScreen) scroll(_ context.Context, _ *mcp.CallToolRequest, in mcpScrollInput) (*mcp.CallToolResult, any, error) {
@@ -487,7 +532,7 @@ func (s mcpScreen) scroll(_ context.Context, _ *mcp.CallToolRequest, in mcpScrol
 		dy -= int(sy)
 		dx -= int(sx)
 	}
-	return nil, nil, nil
+	return mcpDone("Turned the wheel delta_y=%d, delta_x=%d at %g,%g. Take a screenshot to see which way the host scrolled.", in.DeltaY, in.DeltaX, in.X, in.Y)
 }
 
 // keyAliases are short forms models tend to use for the modifier keys.
@@ -578,7 +623,10 @@ func mcpPressKeys(_ context.Context, _ *mcp.CallToolRequest, in mcpPressKeysInpu
 	if err != nil {
 		return nil, nil, err
 	}
-	return nil, nil, runKeyStrokes([]keyboard.Stroke{stroke}, hold)
+	if err := runKeyStrokes([]keyboard.Stroke{stroke}, hold); err != nil {
+		return nil, nil, err
+	}
+	return mcpDone("Pressed %s for %d ms.", strings.Join(in.Keys, "+"), hold.Milliseconds())
 }
 
 type mcpTypeTextInput struct {
@@ -605,7 +653,10 @@ func mcpTypeText(_ context.Context, _ *mcp.CallToolRequest, in mcpTypeTextInput)
 	if err != nil {
 		return nil, nil, err
 	}
-	return nil, nil, runKeyStrokes(strokes, mcpKeyDelay)
+	if err := runKeyStrokes(strokes, mcpKeyDelay); err != nil {
+		return nil, nil, err
+	}
+	return mcpDone("Typed %d characters with the %s layout (%s).", len([]rune(in.Text)), layout.IsoCode, layout.Name)
 }
 
 type mcpState struct {
@@ -648,7 +699,13 @@ func mcpWakeHost(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.Ca
 	if err := requireHID(); err != nil {
 		return nil, nil, err
 	}
-	return nil, nil, rpcWakeHost()
+	if err := rpcWakeHost(); err != nil {
+		return nil, nil, err
+	}
+	// The USB state does not tell whether the host sleeps: a sleeping Mac
+	// keeps the port configured and still wakes from this signal.
+	return mcpDone("Sent a USB remote wakeup. A sleeping host that allows USB wakeup wakes within a few seconds; " +
+		"a display that only went dark wakes from a key press such as ShiftLeft. Take a screenshot to check.")
 }
 
 type mcpPowerInput struct {
@@ -658,11 +715,22 @@ type mcpPowerInput struct {
 func mcpPower(_ context.Context, _ *mcp.CallToolRequest, in mcpPowerInput) (*mcp.CallToolResult, any, error) {
 	switch config.ActiveExtension {
 	case "atx-power":
-		return nil, nil, rpcSetATXPowerAction(in.Action)
+		if err := rpcSetATXPowerAction(in.Action); err != nil {
+			return nil, nil, err
+		}
+		done := map[string]string{
+			"power-short": "Pressed the power button.",
+			"power-long":  "Held the power button for five seconds.",
+			"reset":       "Pressed the reset button.",
+		}
+		return mcpDone("%s", done[in.Action])
 	case "dc-power":
 		switch in.Action {
 		case "on", "off":
-			return nil, nil, rpcSetDCPowerState(in.Action == "on")
+			if err := rpcSetDCPowerState(in.Action == "on"); err != nil {
+				return nil, nil, err
+			}
+			return mcpDone("Switched the host's power supply %s.", in.Action)
 		}
 		return nil, nil, fmt.Errorf("invalid action %q for the DC extension, use on or off", in.Action)
 	}
@@ -684,17 +752,27 @@ func mcpMountMedia(_ context.Context, _ *mcp.CallToolRequest, in mcpMountInput) 
 	default:
 		return nil, nil, fmt.Errorf("unknown mode %q, use CDROM or Disk", in.Mode)
 	}
+	var source string
+	var err error
 	switch {
 	case in.URL != "" && in.File != "":
 		return nil, nil, errors.New("give either url or file, not both")
 	case in.URL != "":
-		return nil, nil, rpcMountWithHTTP(in.URL, mode)
+		source, err = in.URL, rpcMountWithHTTP(in.URL, mode)
 	case in.File != "":
-		return nil, nil, rpcMountWithStorage(in.File, mode)
+		source, err = in.File, rpcMountWithStorage(in.File, mode)
+	default:
+		return nil, nil, errors.New("give url or file")
 	}
-	return nil, nil, errors.New("give url or file")
+	if err != nil {
+		return nil, nil, err
+	}
+	return mcpDone("Attached %s to the host as a USB %s.", source, mode)
 }
 
 func mcpUnmountMedia(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.CallToolResult, any, error) {
-	return nil, nil, rpcUnmountImage()
+	if err := rpcUnmountImage(); err != nil {
+		return nil, nil, err
+	}
+	return mcpDone("Detached the virtual USB drive from the host.")
 }
