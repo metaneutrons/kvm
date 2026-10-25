@@ -44,12 +44,10 @@ If the screenshot reports no signal, the display may be asleep: press a key such
 
 var mcpHandler = sync.OnceValue(func() http.Handler {
 	server := newMCPServer()
-	handler := mcp.NewStreamableHTTPHandler(
+	return mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
 	)
-	// /api also accepts the login cookie, so reject cross-site browser requests.
-	return http.NewCrossOriginProtection().Handler(handler)
 })
 
 func handleMCP(c *gin.Context) {
@@ -393,12 +391,19 @@ func keyStroke(names []string) (keyboard.Stroke, error) {
 	return stroke, nil
 }
 
+// mcpKeyboardLock runs one keyboard tool call at a time. Stateless MCP calls
+// can arrive in parallel, and a new macro cancels the running one, so two
+// type_text calls would otherwise cut each other off.
+var mcpKeyboardLock sync.Mutex
+
 // runKeyStrokes presses and releases each stroke in turn through the keyboard
 // macro runner the paste dialog uses.
 func runKeyStrokes(strokes []keyboard.Stroke, hold time.Duration) error {
 	if err := requireHID(); err != nil {
 		return err
 	}
+	mcpKeyboardLock.Lock()
+	defer mcpKeyboardLock.Unlock()
 	steps := make([]hidrpc.KeyboardMacroStep, 0, 2*len(strokes))
 	for _, s := range strokes {
 		keys := make([]byte, hidrpc.HidKeyBufferSize)
