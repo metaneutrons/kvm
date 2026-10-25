@@ -234,7 +234,7 @@ func setupRouter() *gin.Engine {
 		api.POST("/rpc", handleAPIRPC)
 		// Uploads start with the startStorageFileUpload RPC, which returns the
 		// uploadId for this request.
-		api.POST("/storage/upload", handleUploadHttp)
+		api.POST("/storage/upload", requireFullScope, handleUploadHttp)
 		// In stateless mode the MCP handler answers GET and DELETE itself.
 		api.Any("/mcp", handleMCP)
 	}

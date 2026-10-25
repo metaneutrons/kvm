@@ -3,6 +3,7 @@
 package kvm
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -77,7 +78,7 @@ func newAPITestRouter() *gin.Engine {
 	api := r.Group("/api")
 	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
 	api.POST("/rpc", handleAPIRPC)
-	api.POST("/storage/upload", handleUploadHttp)
+	api.POST("/storage/upload", requireFullScope, handleUploadHttp)
 	protected := r.Group("/")
 	protected.Use(protectedMiddleware())
 	protected.GET("/device", func(c *gin.Context) { c.Status(http.StatusOK) })
@@ -177,5 +178,50 @@ func TestAPIRejectsCrossSiteRequests(t *testing.T) {
 	}
 	if code := send("same-site"); code != http.StatusForbidden {
 		t.Errorf("same-site request from another origin: status %d, want 403", code)
+	}
+}
+
+func TestAPIViewOnlyToken(t *testing.T) {
+	token := setUpAPITest(t)
+	config.APITokenScope = apiScopeView
+	r := newAPITestRouter()
+
+	call := func(method string) JSONRPCResponse {
+		w := doAPIRequest(r, http.MethodPost, "/api/rpc", `{"jsonrpc":"2.0","method":"`+method+`","id":1}`, token, "")
+		var resp JSONRPCResponse
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		return resp
+	}
+	if resp := call("ping"); resp.Result != "pong" {
+		t.Errorf("ping with a view-only token: %+v", resp)
+	}
+	resp := call("keypressReport")
+	if errObj, _ := resp.Error.(map[string]any); errObj == nil || errObj["code"] != float64(-32001) {
+		t.Errorf("input with a view-only token: %+v", resp)
+	}
+	if w := doAPIRequest(r, http.MethodPost, "/api/storage/upload?uploadId=none", "", token, ""); w.Code != http.StatusForbidden {
+		t.Errorf("upload with a view-only token: status %d, want 403", w.Code)
+	}
+	// The login cookie keeps full control.
+	if w := doAPIRequest(r, http.MethodPost, "/api/storage/upload?uploadId=none", "", "", "cookie-token"); w.Code != http.StatusNotFound {
+		t.Errorf("upload with the login cookie: status %d, want 404", w.Code)
+	}
+}
+
+func TestAPITokenNeedsHTTPSWhenEnabled(t *testing.T) {
+	token := setUpAPITest(t)
+	config.TLSMode = "self-signed"
+	r := newAPITestRouter()
+	w := doAPIRequest(r, http.MethodPost, "/api/rpc", `{"jsonrpc":"2.0","method":"ping","id":1}`, token, "")
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "https") {
+		t.Errorf("token over HTTP with HTTPS enabled: status %d, %s", w.Code, w.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/rpc", strings.NewReader(`{"jsonrpc":"2.0","method":"ping","id":1}`))
+	req.TLS = &tls.ConnectionState{}
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("token over HTTPS: status %d, %s", w.Code, w.Body.String())
 	}
 }
