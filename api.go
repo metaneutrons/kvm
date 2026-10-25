@@ -123,6 +123,18 @@ func handleGetAPIToken(c *gin.Context) {
 	})
 }
 
+// setAPIToken stores the token hash and keeps the previous token if the
+// configuration cannot be saved, so the response matches what is in effect.
+func setAPIToken(hash, createdAt string) error {
+	prevHash, prevCreatedAt := config.APITokenHash, config.APITokenCreatedAt
+	config.APITokenHash, config.APITokenCreatedAt = hash, createdAt
+	if err := SaveConfig(); err != nil {
+		config.APITokenHash, config.APITokenCreatedAt = prevHash, prevCreatedAt
+		return err
+	}
+	return nil
+}
+
 // handleCreateAPIToken creates a new token, replacing an existing one. The
 // token is only returned here and cannot be read back later.
 func handleCreateAPIToken(c *gin.Context) {
@@ -132,9 +144,7 @@ func handleCreateAPIToken(c *gin.Context) {
 		return
 	}
 
-	config.APITokenHash = hashAPIToken(token)
-	config.APITokenCreatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := SaveConfig(); err != nil {
+	if err := setAPIToken(hashAPIToken(token), time.Now().UTC().Format(time.RFC3339)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
 		return
 	}
@@ -144,9 +154,7 @@ func handleCreateAPIToken(c *gin.Context) {
 }
 
 func handleDeleteAPIToken(c *gin.Context) {
-	config.APITokenHash = ""
-	config.APITokenCreatedAt = ""
-	if err := SaveConfig(); err != nil {
+	if err := setAPIToken("", ""); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
 		return
 	}
