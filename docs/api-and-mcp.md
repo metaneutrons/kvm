@@ -11,8 +11,9 @@ access to them like access to the JetKVM itself.
 
 1. Set a password for the JetKVM (Settings → Access → Local). The API token is
    only available in password mode.
-2. Under Settings → Access → API Token, select **Create Token**. Copy the token
-   right away; it is shown once and stored on the device only as a hash.
+2. Under Settings → Access → API Token, choose the permissions and select
+   **Create Token**. Copy the token right away; it is shown once and stored on
+   the device only as a hash.
 3. Send it with every request:
 
    ```
@@ -23,6 +24,14 @@ access to them like access to the JetKVM itself.
 Token** switches token access off. The token works for `/api` only, not for the
 web UI, password changes or settings. Failed attempts count towards the same
 rate limit as login attempts.
+
+A token has one of two permissions:
+
+- **Full control**: screenshots, state, keyboard and mouse input, virtual
+  media and power.
+- **View only**: screenshots and state. It sends no input, mounts nothing and
+  calls no power action. Over MCP it offers only `screenshot`, `get_state` and
+  `wait`.
 
 Requests from a browser that is logged in to the web UI also pass, as long as
 they come from the JetKVM's own pages. Requests that other websites make the
@@ -38,9 +47,10 @@ can read and reuse it. Enable HTTPS under Settings → Access → HTTPS Mode
 (**Self-signed** or **Custom** with your own certificate) and use `https://`
 URLs in every client.
 
-HTTP on port 80 stays available after HTTPS is enabled, so a client configured
-with an `http://` URL keeps sending the token in plain text. Check the URL when
-you set up a client.
+HTTP on port 80 stays available after HTTPS is enabled. While HTTPS is enabled,
+the device refuses the token over plain HTTP with 403, so a client configured
+with an `http://` URL fails at once. The token has then crossed the network
+unencrypted once, so replace it if that network is not trusted.
 
 With a self-signed certificate, clients have to trust it. For Claude Code and
 other Node.js clients, export the certificate from the browser and point
@@ -88,9 +98,10 @@ zoomed image maps back to screen coordinates.
 |---|---|
 | `screenshot` | The screen as JPEG, or a zoomed region of it. Starts video capture if no browser session runs it, and keeps it running for 30 seconds. |
 | `move_mouse`, `click`, `drag`, `scroll` | Mouse input at screen coordinates. Needs the absolute mouse, which is on by default. |
-| `press_keys` | Presses keys together, e.g. `["ControlLeft", "KeyC"]`. Keys are named after the physical US position, as in `KeyboardEvent.code`; `Ctrl`, `Shift`, `Alt`, `Cmd`, `Win` and `Esc` work as short forms. |
+| `press_keys` | Presses keys together, e.g. `["ControlLeft", "KeyC"]`, and holds them for up to 30 seconds. Keys are named after the physical US position, as in `KeyboardEvent.code`; `Ctrl`, `Shift`, `Alt`, `Cmd`, `Win` and `Esc` work as short forms. |
 | `type_text` | Types up to 4096 characters through a keyboard layout. |
 | `get_state` | Video signal, USB, keyboard layout and LEDs, virtual media, power. |
+| `wait` | Waits a number of seconds, or until the screen changes or settles. |
 | `wake_host` | Sends a USB remote wakeup to a sleeping host. |
 | `power` | Power button, reset or power supply, with the ATX or DC extension. |
 | `mount_media`, `unmount_media` | Attaches an image from a URL or the JetKVM's storage as a USB CD-ROM or disk. |
@@ -115,7 +126,15 @@ Points to know:
   wakeup. A display that only went dark wakes from a key press instead, for
   example `press_keys` with `["ShiftLeft"]`.
 - **Shared input.** People using the web UI and the agent type into the same
-  keyboard and mouse. Keyboard calls from the agent run one at a time.
+  keyboard and mouse. Keyboard calls from the agent run one at a time. While an
+  agent or script sends input, the web UI shows a notice at the bottom of the
+  video, until 10 seconds after the last action.
+- **Seeing the result.** The input tools take `screenshot: true` and then return
+  a screenshot once the screen has settled, which saves a separate call. The
+  `wait` tool waits a number of seconds, or until the screen changes or stops
+  changing, for example while an app starts.
+- **Holding keys.** `press_keys` holds keys for up to 30 seconds (`hold_ms`),
+  for example Option through a Mac's startup to reach the boot picker.
 
 ## HTTP endpoints
 
@@ -153,3 +172,11 @@ Uploads an image in two steps: `startStorageFileUpload` (`filename`, `size`)
 over `/api/rpc` returns an `uploadId` as `dataChannel`; then send the file as the
 request body to `/api/storage/upload?uploadId=…`. Afterwards it can be mounted
 with `mountWithStorage` or the `mount_media` tool.
+
+## Audit log
+
+Every action taken through `/api/rpc` or the MCP server, and every screenshot an
+agent takes, is logged by the `api` component of the device log at info level,
+whatever the default log level. Typed text is not logged, only its length.
+High-frequency input over `/api/rpc`, such as single mouse moves, is logged at
+debug level.
