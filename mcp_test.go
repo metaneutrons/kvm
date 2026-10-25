@@ -23,6 +23,11 @@ func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func connectMCPTestClient(t *testing.T) *mcp.ClientSession {
 	t.Helper()
+	return connectMCPTestClientTo(t, "/api/mcp")
+}
+
+func connectMCPTestClientTo(t *testing.T, path string) *mcp.ClientSession {
+	t.Helper()
 	token := setUpAPITest(t)
 	r := newAPITestRouter()
 	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
@@ -31,7 +36,7 @@ func connectMCPTestClient(t *testing.T) *mcp.ClientSession {
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
 	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
-		Endpoint:   srv.URL + "/api/mcp",
+		Endpoint:   srv.URL + path,
 		HTTPClient: &http.Client{Transport: bearerTransport{token}},
 	}, nil)
 	if err != nil {
@@ -117,11 +122,14 @@ func TestMCPRequiresAuth(t *testing.T) {
 
 func TestAbsPosition(t *testing.T) {
 	tests := []struct {
-		x, y, w, h     int
+		x, y           float64
+		w, h           int
 		wantX, wantY   int
 		wantErrContain string
 	}{
 		{0, 0, 1920, 1080, 8, 15, ""},
+		// A fraction lands between two pixels.
+		{959.5, 539.5, 1920, 1080, 16383, 16383, ""},
 		{959, 539, 1920, 1080, 16374, 16368, ""},
 		{1919, 1079, 1920, 1080, 32758, 32751, ""},
 		{1920, 0, 1920, 1080, 0, 0, "outside"},
@@ -132,12 +140,12 @@ func TestAbsPosition(t *testing.T) {
 		x, y, err := absPosition(tt.x, tt.y, tt.w, tt.h)
 		if tt.wantErrContain != "" {
 			if err == nil || !strings.Contains(err.Error(), tt.wantErrContain) {
-				t.Errorf("absPosition(%d,%d,%d,%d) error %v, want %q", tt.x, tt.y, tt.w, tt.h, err, tt.wantErrContain)
+				t.Errorf("absPosition(%g,%g,%d,%d) error %v, want %q", tt.x, tt.y, tt.w, tt.h, err, tt.wantErrContain)
 			}
 			continue
 		}
 		if err != nil || x != tt.wantX || y != tt.wantY {
-			t.Errorf("absPosition(%d,%d,%d,%d) = %d,%d,%v, want %d,%d", tt.x, tt.y, tt.w, tt.h, x, y, err, tt.wantX, tt.wantY)
+			t.Errorf("absPosition(%g,%g,%d,%d) = %d,%d,%v, want %d,%d", tt.x, tt.y, tt.w, tt.h, x, y, err, tt.wantX, tt.wantY)
 		}
 	}
 }
@@ -156,38 +164,44 @@ func TestKeyStroke(t *testing.T) {
 }
 
 func TestMCPScreenSize(t *testing.T) {
-	tests := []struct{ w, h, wantW, wantH int }{
-		{1920, 1080, 1280, 720},
-		{1280, 1024, 1280, 1024},
-		{1024, 768, 1024, 768},
-		{2560, 1440, 1280, 720},
-		{1920, 1200, 1280, 800},
+	tests := []struct {
+		screen             mcpScreen
+		w, h, wantW, wantH int
+	}{
+		{1280, 1920, 1080, 1280, 720},
+		{1280, 1280, 1024, 1280, 1024},
+		{1280, 1024, 768, 1024, 768},
+		{1280, 2560, 1440, 1280, 720},
+		{1280, 1920, 1200, 1280, 800},
+		{0, 1920, 1080, 1920, 1080},
+		{1600, 1920, 1080, 1600, 900},
 	}
 	for _, tt := range tests {
-		if w, h := mcpScreenSize(tt.w, tt.h); w != tt.wantW || h != tt.wantH {
-			t.Errorf("mcpScreenSize(%d,%d) = %d,%d, want %d,%d", tt.w, tt.h, w, h, tt.wantW, tt.wantH)
+		if w, h := tt.screen.size(tt.w, tt.h); w != tt.wantW || h != tt.wantH {
+			t.Errorf("mcpScreen(%d).size(%d,%d) = %d,%d, want %d,%d", tt.screen, tt.w, tt.h, w, h, tt.wantW, tt.wantH)
 		}
 	}
 }
 
 func TestMCPSnapshotOptions(t *testing.T) {
+	screen := mcpScreen(mcpDefaultScreenWidth)
 	// The whole 1080p screen is scaled to 1280x720.
-	opts, err := mcpSnapshotOptions(80, nil, 1920, 1080)
+	opts, err := screen.snapshotOptions(80, nil, 1920, 1080)
 	if err != nil || opts.Width != 1280 || opts.Height != 720 || opts.CropWidth != 0 {
 		t.Errorf("full screen: %+v, %v", opts, err)
 	}
 	// A screen that fits is captured as it is.
-	opts, err = mcpSnapshotOptions(80, nil, 1024, 768)
+	opts, err = screen.snapshotOptions(80, nil, 1024, 768)
 	if err != nil || opts.Width != 0 || opts.Height != 0 {
 		t.Errorf("small screen: %+v, %v", opts, err)
 	}
 	// A region in screen coordinates maps to video pixels at full resolution.
-	opts, err = mcpSnapshotOptions(80, &mcpRegion{X: 640, Y: 360, Width: 320, Height: 180}, 1920, 1080)
+	opts, err = screen.snapshotOptions(80, &mcpRegion{X: 640, Y: 360, Width: 320, Height: 180}, 1920, 1080)
 	if err != nil || opts.CropX != 960 || opts.CropY != 540 || opts.CropWidth != 480 || opts.CropHeight != 270 || opts.Width != 0 {
 		t.Errorf("region: %+v, %v", opts, err)
 	}
 	// A wide region is not delivered wider than the screenshot.
-	opts, err = mcpSnapshotOptions(80, &mcpRegion{X: 0, Y: 0, Width: 1280, Height: 360}, 1920, 1080)
+	opts, err = screen.snapshotOptions(80, &mcpRegion{X: 0, Y: 0, Width: 1280, Height: 360}, 1920, 1080)
 	if err != nil || opts.CropWidth != 1920 || opts.Width != 1280 || opts.Height != 360 {
 		t.Errorf("wide region: %+v, %v", opts, err)
 	}
@@ -197,8 +211,55 @@ func TestMCPSnapshotOptions(t *testing.T) {
 		{X: 0, Y: 0, Width: 8, Height: 100},
 		{X: 0, Y: 700, Width: 100, Height: 30},
 	} {
-		if _, err := mcpSnapshotOptions(80, &bad, 1920, 1080); err == nil {
+		if _, err := screen.snapshotOptions(80, &bad, 1920, 1080); err == nil {
 			t.Errorf("region %+v was accepted", bad)
 		}
+	}
+}
+
+func TestParseMCPScreen(t *testing.T) {
+	for raw, want := range map[string]mcpScreen{"": 1280, "native": 0, "1920": 1920, "320": 320} {
+		if got, err := parseMCPScreen(raw); err != nil || got != want {
+			t.Errorf("parseMCPScreen(%q) = %d, %v, want %d", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"0", "100", "8000", "wide", "-1280"} {
+		if _, err := parseMCPScreen(raw); err == nil {
+			t.Errorf("parseMCPScreen(%q) was accepted", raw)
+		}
+	}
+}
+
+func TestMCPScreenWidthParameter(t *testing.T) {
+	description := func(path string) string {
+		session := connectMCPTestClientTo(t, path)
+		res, err := session.ListTools(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tool := range res.Tools {
+			if tool.Name == "screenshot" {
+				return tool.Description
+			}
+		}
+		t.Fatalf("%s has no screenshot tool", path)
+		return ""
+	}
+	if d := description("/api/mcp"); !strings.Contains(d, "at most 1280 pixels") {
+		t.Errorf("default description: %q", d)
+	}
+	if d := description("/api/mcp?screen_width=native"); !strings.Contains(d, "own resolution") {
+		t.Errorf("native description: %q", d)
+	}
+	if d := description("/api/mcp?screen_width=1600"); !strings.Contains(d, "at most 1600 pixels") {
+		t.Errorf("1600 description: %q", d)
+	}
+
+	token := setUpAPITest(t)
+	r := newAPITestRouter()
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
+	w := doAPIRequest(r, http.MethodPost, "/api/mcp?screen_width=huge", "{}", token, "")
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "screen_width") {
+		t.Errorf("invalid screen_width: status %d, %s", w.Code, w.Body.String())
 	}
 }
