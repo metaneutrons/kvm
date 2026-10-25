@@ -19,6 +19,7 @@ JetKVM is a high-performance, open-source KVM over IP (Keyboard, Video, Mouse) s
 - **Free & Optional Remote Access** - Remote management via JetKVM Cloud using WebRTC.
 - **Optional Tailscale Networking** - Built-in Tailscale status and control-server configuration, including custom [Headscale](https://headscale.net/)-compatible endpoints.
 - **Open-source software** - Written in Golang on Linux. Easily customizable through SSH access to the JetKVM device.
+- **API and AI agents** - An HTTP API with token authentication and a built-in MCP server let scripts and AI agents see the screen and use keyboard and mouse. See [API and MCP server](docs/api-and-mcp.md).
 
 ## Contributing
 
