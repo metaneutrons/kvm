@@ -504,8 +504,8 @@ static void jpeg_chn_destroy()
 #define SNAPSHOT_MIN_SIZE 16
 
 // Fits the requested region and size to the frame: the region is clamped to
-// the frame and aligned to even pixels, as YUYV packs two pixels together,
-// and the picture is no larger than the region.
+// the frame and its position and size are aligned to even pixels, which the
+// RGA requires for YUV sources, and the picture is no larger than the region.
 static int snapshot_geometry(const jetkvm_snapshot_params_t *p, RK_U32 frame_width, RK_U32 frame_height,
                              im_rect *crop, RK_U32 *out_width, RK_U32 *out_height)
 {
@@ -526,6 +526,7 @@ static int snapshot_geometry(const jetkvm_snapshot_params_t *p, RK_U32 frame_wid
     if (y + h > (int)frame_height)
         h = (int)frame_height - y;
     x &= ~1;
+    y &= ~1;
     w &= ~1;
     h &= ~1;
     if (w < SNAPSHOT_MIN_SIZE || h < SNAPSHOT_MIN_SIZE)
