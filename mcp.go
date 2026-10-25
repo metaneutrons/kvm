@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"image/jpeg"
 	"net/http"
 	"strconv"
@@ -36,8 +37,14 @@ const (
 	// mcpDragNudge is about one pixel of a 1080p screen in absolute units.
 	mcpDragNudge = 16
 	mcpMaxScroll = 50
-	mcpMaxHold   = 5 * time.Second
-	absMouseMax  = 32767
+	// mcpMaxHold allows holding a key through a boot, e.g. Option on a Mac.
+	mcpMaxHold = 30 * time.Second
+	// mcpMaxWait bounds the wait tool.
+	mcpMaxWait = 60 * time.Second
+	// mcpSettleWait bounds the wait for the screen to settle before the
+	// screenshot an input tool returns on request.
+	mcpSettleWait = 3 * time.Second
+	absMouseMax   = 32767
 	// mcpDefaultScreenWidth is the widest screen the agent sees unless the
 	// client asks for another width. Larger video is scaled down to it, which
 	// keeps screenshots small and below the sizes at which clients scale
@@ -69,7 +76,7 @@ func parseMCPScreen(raw string) (mcpScreen, error) {
 	return mcpScreen(width), nil
 }
 
-func (s mcpScreen) instructions() string {
+func (s mcpScreen) instructions(readOnly bool) string {
 	size := fmt.Sprintf("scaled to at most %d pixels wide", int(s))
 	if s == 0 {
 		size = "at the video's own resolution"
@@ -77,12 +84,25 @@ func (s mcpScreen) instructions() string {
 	return `This server controls the computer attached to a JetKVM. It sees the computer's HDMI output and acts as its USB keyboard and mouse.
 Take a screenshot first. It shows the whole screen, ` + size + `, and states the screen size. All mouse tools take x,y in the pixels of that full screenshot, with 0,0 at the top left. Fractions such as 412.5 are allowed for precise positions.
 To read small text or check details, take a screenshot with a region: it returns that part of the screen enlarged up to the real resolution. Coordinates for the mouse tools stay those of the full screenshot; the response explains how to convert a point in the zoomed image.
-type_text types characters through the host's keyboard layout, which must match the layout the host uses. press_keys sends key combinations by key name.
-If the screenshot reports no signal, the display may be asleep: press a key such as ShiftLeft or call wake_host, then take a new screenshot.`
+type_text types characters through a keyboard layout, which must match the layout the host uses; for a Mac pick the macOS variant, such as de-DE-macos (get_state lists them). press_keys sends key combinations by key name.
+Input tools take screenshot: true to return a screenshot once the screen has settled after the action, which saves a separate call. The wait tool waits for the screen to change or settle, for example while an app starts.
+If the screenshot reports no signal, the display may be asleep: press a key such as ShiftLeft or call wake_host, then take a new screenshot.` + viewOnlyNote(readOnly)
 }
 
-// mcpServers holds one server per screen width, as the tool descriptions and
-// coordinates depend on it.
+func viewOnlyNote(readOnly bool) string {
+	if !readOnly {
+		return ""
+	}
+	return "\nThis connection uses a view-only token: only screenshot and get_state are available, and no input can be sent."
+}
+
+// mcpServerKey selects a server: the tool descriptions and coordinates depend
+// on the screen width, and a view-only token gets no input tools.
+type mcpServerKey struct {
+	screen   mcpScreen
+	readOnly bool
+}
+
 var mcpServers sync.Map
 
 var mcpHandler = sync.OnceValue(func() http.Handler {
@@ -92,10 +112,11 @@ var mcpHandler = sync.OnceValue(func() http.Handler {
 			if err != nil {
 				return nil
 			}
-			if server, ok := mcpServers.Load(screen); ok {
+			key := mcpServerKey{screen: screen, readOnly: apiScope(r.Context()) == apiScopeView}
+			if server, ok := mcpServers.Load(key); ok {
 				return server.(*mcp.Server)
 			}
-			server, _ := mcpServers.LoadOrStore(screen, newMCPServer(screen))
+			server, _ := mcpServers.LoadOrStore(key, newMCPServer(key.screen, key.readOnly))
 			return server.(*mcp.Server)
 		},
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
@@ -116,10 +137,51 @@ var (
 	mcpInput = &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(false)}
 )
 
-func newMCPServer(screen mcpScreen) *mcp.Server {
+// mcpAfter is embedded in input tools' arguments to ask for a screenshot of
+// the result.
+type mcpAfter struct {
+	Screenshot bool `json:"screenshot,omitempty" jsonschema:"return a screenshot once the screen has settled after the action"`
+}
+
+func (a mcpAfter) wantsScreenshot() bool { return a.Screenshot }
+
+// trackMCP logs an input tool's call and tells the web UI that an agent is
+// active before the tool runs. If asked, it adds a screenshot of the result.
+func trackMCP[In, Out any](screen mcpScreen, name string, handler mcp.ToolHandlerFor[In, Out]) mcp.ToolHandlerFor[In, Out] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+		noteAgentAction("mcp", name, mcpActionDetail(in))
+		result, out, err := handler(ctx, req, in)
+		after, ok := any(in).(interface{ wantsScreenshot() bool })
+		if err != nil || result == nil || !ok || !after.wantsScreenshot() {
+			return result, out, err
+		}
+		waitForScreen(ctx, waitUntilStable, mcpSettleWait)
+		shot, shotErr := screen.capture(0, nil)
+		if shotErr != nil {
+			result.Content = append(result.Content, &mcp.TextContent{Text: "No screenshot: " + shotErr.Error()})
+		} else {
+			result.Content = append(result.Content, shot...)
+		}
+		return result, out, err
+	}
+}
+
+// mcpActionDetail describes a tool call for the log. Typed text is left out,
+// as it may be a password.
+func mcpActionDetail(in any) string {
+	switch v := in.(type) {
+	case mcpTypeTextInput:
+		return fmt.Sprintf("%d characters, layout %q", len([]rune(v.Text)), v.Layout)
+	case mcpEmpty:
+		return ""
+	}
+	return fmt.Sprintf("%+v", in)
+}
+
+func newMCPServer(screen mcpScreen, readOnly bool) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "jetkvm", Title: "JetKVM", Version: builtAppVersion},
-		&mcp.ServerOptions{Instructions: screen.instructions()},
+		&mcp.ServerOptions{Instructions: screen.instructions(readOnly)},
 	)
 
 	fullScreen := fmt.Sprintf("scaled to at most %d pixels wide", int(screen))
@@ -134,66 +196,77 @@ func newMCPServer(screen mcpScreen) *mcp.Server {
 		Annotations: mcpReadOnly,
 	}, screen.screenshot)
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_state",
+		Description: "Report the video signal, USB connection, keyboard layout and LEDs, virtual media and power state.",
+		Annotations: mcpReadOnly,
+	}, mcpGetState)
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "wait",
+		Description: "Wait before the next step: a number of seconds, or until the screen changes (until: change) " +
+			"or stops changing (until: stable), at most 60 seconds. Use it while an app starts, a page loads or the host boots. " +
+			"Live content such as a ticking clock or a CPU graph counts as a change, but does not keep the screen from being stable.",
+		Annotations: mcpReadOnly,
+	}, mcpWait)
+	if readOnly {
+		return server
+	}
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "move_mouse",
 		Description: "Move the mouse pointer to a screen position.",
 		Annotations: mcpInput,
-	}, screen.moveMouse)
+	}, trackMCP(screen, "move_mouse", screen.moveMouse))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "click",
 		Description: "Move the mouse pointer to a screen position and click a button there.",
 		Annotations: mcpInput,
-	}, screen.click)
+	}, trackMCP(screen, "click", screen.click))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "drag",
 		Description: "Press a mouse button at one screen position, move to another and release it there.",
 		Annotations: mcpInput,
-	}, screen.drag)
+	}, trackMCP(screen, "drag", screen.drag))
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "scroll",
 		Description: "Move the mouse pointer to a screen position and turn the scroll wheel there. " +
 			"Positive delta_y turns the wheel down, which scrolls down on Windows and Linux. macOS reverses it with natural scrolling, its default, " +
 			"so check the direction with a screenshot.",
 		Annotations: mcpInput,
-	}, screen.scroll)
+	}, trackMCP(screen, "scroll", screen.scroll))
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "press_keys",
 		Description: "Press keys together and release them, for shortcuts and special keys. " +
 			`Keys are named after the physical US key position, as in the browser's KeyboardEvent.code: "KeyA", "Digit1", "Enter", "Tab", "Escape", "Backspace", "ArrowUp", "F5", "ControlLeft", "ShiftLeft", "AltLeft", "AltRight", "MetaLeft". ` +
 			`Ctrl, Shift, Alt, Cmd, Win and Esc are accepted as short forms. Example: ["ControlLeft", "KeyC"].`,
 		Annotations: mcpInput,
-	}, mcpPressKeys)
+	}, trackMCP(screen, "press_keys", mcpPressKeys))
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "type_text",
 		Description: "Type text on the host's keyboard. Characters are mapped through a keyboard layout, " +
-			"which must match the layout the host uses. Newlines press Enter. Fails without typing anything if a character is not in the layout.",
+			"which must match the layout the host uses: for a Mac use the macOS variant such as de-DE-macos or en-US-macos, for Windows and Linux the plain one such as de-DE. " +
+			"The default is the layout set in the JetKVM. Newlines press Enter. Fails without typing anything if a character is not in the layout.",
 		Annotations: mcpInput,
-	}, mcpTypeText)
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "get_state",
-		Description: "Report the video signal, USB connection, keyboard layout and LEDs, virtual media and power state.",
-		Annotations: mcpReadOnly,
-	}, mcpGetState)
+	}, trackMCP(screen, "type_text", mcpTypeText))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wake_host",
 		Description: "Send a USB remote wakeup signal to wake the host from sleep.",
 		Annotations: mcpInput,
-	}, mcpWakeHost)
+	}, trackMCP(screen, "wake_host", mcpWakeHost))
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "power",
 		Description: "Use the power extension. With the ATX extension: power-short presses the power button, power-long holds it for five seconds to force off, reset presses reset. " +
 			"With the DC extension: on and off switch the host's power supply.",
 		Annotations: mcpInput,
-	}, mcpPower)
+	}, trackMCP(screen, "power", mcpPower))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "mount_media",
 		Description: "Attach an image to the host as a USB drive, either from a URL or from a file in the JetKVM's storage.",
 		Annotations: mcpInput,
-	}, mcpMountMedia)
+	}, trackMCP(screen, "mount_media", mcpMountMedia))
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "unmount_media",
 		Description: "Detach the virtual USB drive from the host.",
 		Annotations: mcpInput,
-	}, mcpUnmountMedia)
+	}, trackMCP(screen, "unmount_media", mcpUnmountMedia))
 
 	return server
 }
@@ -263,12 +336,22 @@ func (s mcpScreen) snapshotOptions(quality int, region *mcpRegion, videoWidth, v
 }
 
 func (s mcpScreen) screenshot(_ context.Context, _ *mcp.CallToolRequest, in mcpScreenshotInput) (*mcp.CallToolResult, any, error) {
-	quality := in.Quality
+	noteAgentView("mcp", "screenshot")
+	content, err := s.capture(in.Quality, in.Region)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &mcp.CallToolResult{Content: content}, nil, nil
+}
+
+// capture takes a screenshot of the screen or a region of it and describes
+// its coordinates for the model.
+func (s mcpScreen) capture(quality int, region *mcpRegion) ([]mcp.Content, error) {
 	if quality == 0 {
 		quality = native.DefaultSnapshotQuality
 	}
 	if quality < 1 || quality > 99 {
-		return nil, nil, errors.New("quality must be between 1 and 99")
+		return nil, errors.New("quality must be between 1 and 99")
 	}
 
 	// The video size is only known while there is a signal. Without one the
@@ -280,8 +363,8 @@ func (s mcpScreen) screenshot(_ context.Context, _ *mcp.CallToolRequest, in mcpS
 		opts := native.SnapshotOptions{Quality: quality}
 		if known {
 			var err error
-			if opts, err = s.snapshotOptions(quality, in.Region, videoWidth, videoHeight); err != nil {
-				return nil, nil, err
+			if opts, err = s.snapshotOptions(quality, region, videoWidth, videoHeight); err != nil {
+				return nil, err
 			}
 		}
 		var err error
@@ -289,9 +372,9 @@ func (s mcpScreen) screenshot(_ context.Context, _ *mcp.CallToolRequest, in mcpS
 		var noSignal errNoVideoSignal
 		switch {
 		case errors.As(err, &noSignal):
-			return nil, nil, fmt.Errorf("no video signal from the host (%s); the display may be asleep, press a key or call wake_host", noSignal.reason)
+			return nil, fmt.Errorf("no video signal from the host (%s); the display may be asleep, press a key or call wake_host", noSignal.reason)
 		case err != nil:
-			return nil, nil, err
+			return nil, err
 		}
 		if known || attempt > 0 || lastVideoState.Width <= 0 {
 			break
@@ -300,23 +383,155 @@ func (s mcpScreen) screenshot(_ context.Context, _ *mcp.CallToolRequest, in mcpS
 
 	cfg, err := jpeg.DecodeConfig(bytes.NewReader(image))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read the snapshot: %w", err)
+		return nil, fmt.Errorf("failed to read the snapshot: %w", err)
 	}
 	screenWidth, screenHeight := s.size(lastVideoState.Width, lastVideoState.Height)
 	var text string
-	if in.Region == nil {
+	if region == nil {
 		text = fmt.Sprintf("Full screen, %dx%d. Mouse tools take x,y in these pixels; fractions are allowed.", screenWidth, screenHeight)
 	} else {
-		r := in.Region
+		r := region
 		text = fmt.Sprintf("Zoomed region x=%d y=%d width=%d height=%d of the %dx%d screen, shown at %dx%d (%.1f times). "+
 			"Mouse tools still take full-screen coordinates: a point u,v in this image is at x = %d + u*%d/%d, y = %d + v*%d/%d.",
 			r.X, r.Y, r.Width, r.Height, screenWidth, screenHeight, cfg.Width, cfg.Height,
 			float64(cfg.Width)/float64(r.Width), r.X, r.Width, cfg.Width, r.Y, r.Height, cfg.Height)
 	}
-	return &mcp.CallToolResult{Content: []mcp.Content{
+	return []mcp.Content{
 		&mcp.ImageContent{Data: image, MIMEType: "image/jpeg"},
 		&mcp.TextContent{Text: text},
-	}}, nil, nil
+	}, nil
+}
+
+const (
+	waitUntilChange = "change"
+	waitUntilStable = "stable"
+	// The screen is compared on thumbnails by the share of pixels whose
+	// brightness changed by more than mcpPixelNoise. Capture and encoding
+	// shift unchanged pixels by up to about 15 levels, which this ignores;
+	// beyond that, noise was measured at no more than 6 of 57600 pixels.
+	// "Changed" needs about 12 pixels, a checkbox being ticked; "stable"
+	// allows a small live element such as a clock or a CPU graph.
+	mcpThumbWidth   = 320
+	mcpPixelNoise   = 24
+	mcpChangedShare = 0.0002
+	mcpStableShare  = 0.002
+	mcpWaitPoll     = 150 * time.Millisecond
+)
+
+func screenThumbnail() (image.Image, error) {
+	data, err := takeVideoSnapshot(native.SnapshotOptions{Quality: 50, Width: mcpThumbWidth})
+	if err != nil {
+		return nil, err
+	}
+	return jpeg.Decode(bytes.NewReader(data))
+}
+
+// screenDifference returns the share of pixels whose brightness differs by
+// more than mcpPixelNoise between two thumbnails, or 1 if they cannot be
+// compared.
+func screenDifference(a, b image.Image) float64 {
+	ya, okA := a.(*image.YCbCr)
+	yb, okB := b.(*image.YCbCr)
+	if !okA || !okB || ya.Rect != yb.Rect || ya.Rect.Empty() {
+		return 1
+	}
+	changed := 0
+	for y := ya.Rect.Min.Y; y < ya.Rect.Max.Y; y++ {
+		for x := ya.Rect.Min.X; x < ya.Rect.Max.X; x++ {
+			d := int(ya.Y[ya.YOffset(x, y)]) - int(yb.Y[yb.YOffset(x, y)])
+			if d > mcpPixelNoise || d < -mcpPixelNoise {
+				changed++
+			}
+		}
+	}
+	return float64(changed) / float64(ya.Rect.Dx()*ya.Rect.Dy())
+}
+
+// waitForScreen waits until the screen changes or stops changing, at most
+// for timeout. It reports whether that happened.
+func waitForScreen(ctx context.Context, until string, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	previous, err := screenThumbnail()
+	if err != nil {
+		return false, err
+	}
+	reference := previous
+	stableRounds := 0
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(mcpWaitPoll):
+		}
+		current, err := screenThumbnail()
+		if err != nil {
+			return false, err
+		}
+		switch until {
+		case waitUntilChange:
+			if screenDifference(reference, current) > mcpChangedShare {
+				return true, nil
+			}
+		case waitUntilStable:
+			// Two quiet intervals in a row, so a slow animation is not
+			// mistaken for a settled screen.
+			if screenDifference(previous, current) <= mcpStableShare {
+				stableRounds++
+				if stableRounds >= 2 {
+					return true, nil
+				}
+			} else {
+				stableRounds = 0
+			}
+		}
+		previous = current
+	}
+	return false, nil
+}
+
+type mcpWaitInput struct {
+	Seconds float64 `json:"seconds,omitempty" jsonschema:"how long to wait; with until, the most to wait; default 1, or 10 with until; at most 60"`
+	Until   string  `json:"until,omitempty" jsonschema:"change: until the screen changes; stable: until it stops changing; empty: the full time"`
+}
+
+func mcpWait(ctx context.Context, _ *mcp.CallToolRequest, in mcpWaitInput) (*mcp.CallToolResult, any, error) {
+	timeout := time.Second
+	if in.Until != "" {
+		timeout = 10 * time.Second
+	}
+	if in.Seconds > 0 {
+		timeout = time.Duration(in.Seconds * float64(time.Second))
+	}
+	if timeout > mcpMaxWait {
+		return nil, nil, fmt.Errorf("wait at most %s", mcpMaxWait)
+	}
+	start := time.Now()
+	switch in.Until {
+	case "":
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(timeout):
+		}
+		return mcpDone("Waited %.1f seconds.", timeout.Seconds())
+	case waitUntilChange, waitUntilStable:
+		done, err := waitForScreen(ctx, in.Until, timeout)
+		if err != nil {
+			return nil, nil, err
+		}
+		elapsed := time.Since(start).Seconds()
+		switch {
+		case done && in.Until == waitUntilChange:
+			return mcpDone("The screen changed after %.1f seconds.", elapsed)
+		case done:
+			return mcpDone("The screen was stable after %.1f seconds.", elapsed)
+		case in.Until == waitUntilChange:
+			return mcpDone("The screen did not change within %.1f seconds.", elapsed)
+		default:
+			return mcpDone("The screen was still changing after %.1f seconds.", elapsed)
+		}
+	}
+	return nil, nil, fmt.Errorf("unknown until %q, use change or stable", in.Until)
 }
 
 func requireHID() error {
@@ -370,7 +585,12 @@ type mcpPoint struct {
 	Y float64 `json:"y" jsonschema:"vertical position in pixels of the full screenshot; fractions allowed"`
 }
 
-func (s mcpScreen) moveMouse(_ context.Context, _ *mcp.CallToolRequest, in mcpPoint) (*mcp.CallToolResult, any, error) {
+type mcpMoveInput struct {
+	mcpPoint
+	mcpAfter
+}
+
+func (s mcpScreen) moveMouse(_ context.Context, _ *mcp.CallToolRequest, in mcpMoveInput) (*mcp.CallToolResult, any, error) {
 	x, y, err := s.toAbsMouse(in.X, in.Y)
 	if err != nil {
 		return nil, nil, err
@@ -383,6 +603,7 @@ func (s mcpScreen) moveMouse(_ context.Context, _ *mcp.CallToolRequest, in mcpPo
 
 type mcpClickInput struct {
 	mcpPoint
+	mcpAfter
 	Button string `json:"button,omitempty" jsonschema:"left, right or middle, default left"`
 	Double bool   `json:"double,omitempty" jsonschema:"click twice"`
 }
@@ -438,6 +659,7 @@ type mcpDragInput struct {
 	ToX    float64 `json:"to_x" jsonschema:"end position, horizontal, in pixels of the full screenshot"`
 	ToY    float64 `json:"to_y" jsonschema:"end position, vertical, in pixels of the full screenshot"`
 	Button string  `json:"button,omitempty" jsonschema:"left, right or middle, default left"`
+	mcpAfter
 }
 
 func (s mcpScreen) drag(_ context.Context, _ *mcp.CallToolRequest, in mcpDragInput) (*mcp.CallToolResult, any, error) {
@@ -496,13 +718,14 @@ func (s mcpScreen) drag(_ context.Context, _ *mcp.CallToolRequest, in mcpDragInp
 
 type mcpScrollInput struct {
 	mcpPoint
+	mcpAfter
 	DeltaY int `json:"delta_y,omitempty" jsonschema:"wheel notches, positive turns the wheel down (the host may reverse the scroll direction)"`
 	DeltaX int `json:"delta_x,omitempty" jsonschema:"wheel notches, positive turns the wheel right (the host may reverse the scroll direction)"`
 }
 
 func (s mcpScreen) scroll(_ context.Context, _ *mcp.CallToolRequest, in mcpScrollInput) (*mcp.CallToolResult, any, error) {
 	if in.DeltaX < -mcpMaxScroll || in.DeltaX > mcpMaxScroll || in.DeltaY < -mcpMaxScroll || in.DeltaY > mcpMaxScroll {
-		return nil, nil, fmt.Errorf("scroll at most %d notches at a time", mcpMaxScroll)
+		return nil, nil, fmt.Errorf("scroll at most %d notches per call; call scroll again for more, or press PageDown, PageUp, Home or End", mcpMaxScroll)
 	}
 	x, y, err := s.toAbsMouse(in.X, in.Y)
 	if err != nil {
@@ -605,7 +828,8 @@ func runKeyStrokes(strokes []keyboard.Stroke, hold time.Duration) error {
 
 type mcpPressKeysInput struct {
 	Keys   []string `json:"keys" jsonschema:"key names pressed together, modifiers included"`
-	HoldMS int      `json:"hold_ms,omitempty" jsonschema:"how long to hold the keys in milliseconds, default 20"`
+	HoldMS int      `json:"hold_ms,omitempty" jsonschema:"how long to hold the keys in milliseconds, default 20, at most 30000 (e.g. Option through a Mac's boot)"`
+	mcpAfter
 }
 
 func mcpPressKeys(_ context.Context, _ *mcp.CallToolRequest, in mcpPressKeysInput) (*mcp.CallToolResult, any, error) {
@@ -631,7 +855,8 @@ func mcpPressKeys(_ context.Context, _ *mcp.CallToolRequest, in mcpPressKeysInpu
 
 type mcpTypeTextInput struct {
 	Text   string `json:"text" jsonschema:"the text to type"`
-	Layout string `json:"layout,omitempty" jsonschema:"keyboard layout of the host as an ISO code such as en-US or de-DE, default the layout set in the JetKVM"`
+	Layout string `json:"layout,omitempty" jsonschema:"keyboard layout of the host, such as de-DE for Windows and Linux or de-DE-macos for a Mac; default the layout set in the JetKVM"`
+	mcpAfter
 }
 
 func mcpTypeText(_ context.Context, _ *mcp.CallToolRequest, in mcpTypeTextInput) (*mcp.CallToolResult, any, error) {

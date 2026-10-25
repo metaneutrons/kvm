@@ -4,6 +4,8 @@ package kvm
 
 import (
 	"context"
+	"encoding/json"
+	"image"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -56,7 +58,7 @@ func TestMCPListsTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		names = append(names, tool.Name)
 	}
-	for _, want := range []string{"screenshot", "move_mouse", "click", "drag", "scroll", "press_keys", "type_text", "get_state", "wake_host", "power", "mount_media", "unmount_media"} {
+	for _, want := range []string{"screenshot", "move_mouse", "click", "drag", "scroll", "press_keys", "type_text", "get_state", "wait", "wake_host", "power", "mount_media", "unmount_media"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("tool %s is missing from %v", want, names)
 		}
@@ -261,5 +263,94 @@ func TestMCPScreenWidthParameter(t *testing.T) {
 	w := doAPIRequest(r, http.MethodPost, "/api/mcp?screen_width=huge", "{}", token, "")
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "screen_width") {
 		t.Errorf("invalid screen_width: status %d, %s", w.Code, w.Body.String())
+	}
+}
+
+func TestScreenDifference(t *testing.T) {
+	newThumb := func(fill uint8) *image.YCbCr {
+		img := image.NewYCbCr(image.Rect(0, 0, 320, 180), image.YCbCrSubsampleRatio420)
+		for i := range img.Y {
+			img.Y[i] = fill
+		}
+		return img
+	}
+	a := newThumb(100)
+	if d := screenDifference(a, newThumb(100)); d != 0 {
+		t.Errorf("identical thumbnails differ by %v", d)
+	}
+	// Encoding noise shifts every pixel a little.
+	if d := screenDifference(a, newThumb(110)); d != 0 {
+		t.Errorf("noise counts as a change: %v", d)
+	}
+	// A checkbox of 4x4 pixels being ticked is a change.
+	b := newThumb(100)
+	for y := 80; y < 84; y++ {
+		for x := 150; x < 154; x++ {
+			b.Y[b.YOffset(x, y)] = 255
+		}
+	}
+	if d := screenDifference(a, b); d <= mcpChangedShare {
+		t.Errorf("a ticked checkbox is not a change: %v", d)
+	}
+	// A clock's minute digits, 8x4 pixels, ticking leave the screen stable.
+	c := newThumb(100)
+	for y := 2; y < 6; y++ {
+		for x := 300; x < 308; x++ {
+			c.Y[c.YOffset(x, y)] = 0
+		}
+	}
+	if d := screenDifference(a, c); d > mcpStableShare {
+		t.Errorf("a ticking clock keeps the screen from being stable: %v", d)
+	}
+	if d := screenDifference(a, image.NewYCbCr(image.Rect(0, 0, 160, 90), image.YCbCrSubsampleRatio420)); d != 1 {
+		t.Errorf("thumbnails of different size compare as %v", d)
+	}
+}
+
+func TestMCPInputToolsOfferScreenshot(t *testing.T) {
+	session := connectMCPTestClient(t)
+	res, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range res.Tools {
+		if !slices.Contains([]string{"move_mouse", "click", "drag", "scroll", "press_keys", "type_text"}, tool.Name) {
+			continue
+		}
+		schema, _ := json.Marshal(tool.InputSchema)
+		if !strings.Contains(string(schema), `"screenshot"`) {
+			t.Errorf("%s has no screenshot argument: %s", tool.Name, schema)
+		}
+	}
+}
+
+func TestMCPViewOnlyToken(t *testing.T) {
+	token := setUpAPITest(t)
+	config.APITokenScope = apiScopeView
+	r := newAPITestRouter()
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:   srv.URL + "/api/mcp",
+		HTTPClient: &http.Client{Transport: bearerTransport{token}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	res, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, tool := range res.Tools {
+		names = append(names, tool.Name)
+	}
+	slices.Sort(names)
+	if want := []string{"get_state", "screenshot", "wait"}; !slices.Equal(names, want) {
+		t.Errorf("view-only tools %v, want %v", names, want)
 	}
 }
