@@ -24,11 +24,15 @@ export interface KeyboardLayout {
   };
 }
 
-// To add a new layout, create a file like the above and add it to the list
+// To add a new layout, create a file like the above and add it to the list.
+// Layouts describe the host's PC keyboard layout as Windows and Linux use it.
+// A layout for another host system adds a variant subtag to the id and the
+// system to the name and file: de-DE-macos, "Deutsch (macOS)", de_DE_macos.ts.
 import { cs_CZ } from "@/keyboardLayouts/cs_CZ";
 import { da_DK } from "@/keyboardLayouts/da_DK";
 import { de_CH } from "@/keyboardLayouts/de_CH";
 import { de_DE } from "@/keyboardLayouts/de_DE";
+import { de_DE_macos } from "@/keyboardLayouts/de_DE_macos";
 import { en_US } from "@/keyboardLayouts/en_US";
 import { en_UK } from "@/keyboardLayouts/en_UK";
 import { es_ES } from "@/keyboardLayouts/es_ES";
@@ -50,6 +54,7 @@ export const keyboards: KeyboardLayout[] = [
   da_DK,
   de_CH,
   de_DE,
+  de_DE_macos,
   en_UK,
   en_US,
   es_ES,
