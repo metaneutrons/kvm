@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jetkvm/kvm/internal/diagnostics"
 	"github.com/jetkvm/kvm/internal/logging"
+	"github.com/jetkvm/kvm/internal/native"
 	"github.com/jetkvm/kvm/internal/supervisor"
 	"github.com/pion/webrtc/v4"
 	"github.com/prometheus/client_golang/prometheus"
@@ -211,6 +213,8 @@ func setupRouter() *gin.Engine {
 		protected.POST("/storage/upload", handleUploadHttp)
 
 		protected.POST("/device/send-wol/:mac-addr", handleSendWOLMagicPacket)
+
+		protected.GET("/video/snapshot", handleVideoSnapshot)
 
 		protected.GET("/diagnostics", handleDiagnosticsDownload)
 	}
@@ -892,6 +896,35 @@ func handleSendWOLMagicPacket(c *gin.Context) {
 	}
 
 	c.String(http.StatusOK, "WOL sent to %s ", macAddr)
+}
+
+func handleVideoSnapshot(c *gin.Context) {
+	quality := native.DefaultSnapshotQuality
+	if q := c.Query("quality"); q != "" {
+		v, err := strconv.Atoi(q)
+		if err != nil || v < 1 || v > 99 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "quality must be between 1 and 99"})
+			return
+		}
+		quality = v
+	}
+
+	jpeg, err := nativeInstance.VideoSnapshot(quality)
+	switch {
+	case errors.Is(err, native.ErrVideoNotStreaming):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	case errors.Is(err, native.ErrSnapshotTimeout):
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": err.Error()})
+		return
+	case err != nil:
+		logger.Warn().Err(err).Msg("failed to take video snapshot")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to take video snapshot"})
+		return
+	}
+
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "image/jpeg", jpeg)
 }
 
 func handleDiagnosticsDownload(c *gin.Context) {

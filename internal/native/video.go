@@ -1,6 +1,7 @@
 package native
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -21,6 +22,19 @@ const DefaultEDID = "00FFFFFFFFFFFF0028B4010001EEFFC0302301038047287856EE91A3544
 const DisabledEDID = "__JETKVM_DISABLED_EDID__"
 
 var extraLockTimeout = 5 * time.Second
+
+// DefaultSnapshotQuality is the JPEG quality factor used when none is given.
+const DefaultSnapshotQuality = 80
+
+// snapshotTimeout bounds the wait for the capture thread to encode a frame.
+const snapshotTimeout = 1 * time.Second
+
+var (
+	// ErrVideoNotStreaming is returned when a snapshot is requested while no video is captured.
+	ErrVideoNotStreaming = errors.New("video is not streaming")
+	// ErrSnapshotTimeout is returned when no frame was encoded within the snapshot timeout.
+	ErrSnapshotTimeout = errors.New("timed out waiting for a video frame")
+)
 
 // VideoState is the state of the video stream.
 type VideoState struct {
@@ -239,6 +253,16 @@ func (n *Native) VideoStart() error {
 
 	videoStart()
 	return nil
+}
+
+// VideoSnapshot encodes the next captured frame as JPEG. quality is 1-99, 0 selects
+// DefaultSnapshotQuality. It does not take videoLock, so a snapshot is not held up by
+// a slow stream reconfiguration; the native side handles the stream stopping meanwhile.
+func (n *Native) VideoSnapshot(quality int) ([]byte, error) {
+	if quality == 0 {
+		quality = DefaultSnapshotQuality
+	}
+	return videoSnapshotJPEG(quality, snapshotTimeout)
 }
 
 // VideoGetStreamingStatus gets the streaming status of the video.

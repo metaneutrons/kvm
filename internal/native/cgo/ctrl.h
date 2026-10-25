@@ -62,6 +62,12 @@ int jetkvm_video_set_quality_factor(float quality_factor);
 float jetkvm_video_get_quality_factor();
 int jetkvm_video_set_codec_type(int codec_type);
 int jetkvm_video_get_codec_type();
+#define VIDEO_SNAPSHOT_ERR_NOT_STREAMING -1
+#define VIDEO_SNAPSHOT_ERR_TIMEOUT -2
+#define VIDEO_SNAPSHOT_ERR_ENCODE -3
+#define VIDEO_SNAPSHOT_ERR_NOMEM -4
+#define VIDEO_SNAPSHOT_ERR_INVALID -5
+int jetkvm_video_snapshot_jpeg(int quality, int timeout_ms, uint8_t **data, size_t *len);
 int jetkvm_video_set_edid(const char *edid_hex);
 char *jetkvm_video_get_edid_hex();
 char *jetkvm_video_log_status();

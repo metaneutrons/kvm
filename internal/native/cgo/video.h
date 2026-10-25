@@ -62,4 +62,18 @@ void video_set_codec_type(int type);
  */
 int video_get_codec_type();
 
+/**
+ * @brief Encode the next captured frame as JPEG
+ *
+ * Blocks until the capture thread has encoded a frame or the timeout expires.
+ * Requires the video stream to be running.
+ *
+ * @param quality JPEG quality factor, 1-99
+ * @param timeout_ms Maximum time to wait for a frame
+ * @param data Receives a malloc'd buffer with the JPEG data, to be freed by the caller
+ * @param len Receives the length of the JPEG data
+ * @return int 0 on success, one of VIDEO_SNAPSHOT_ERR_* (ctrl.h) on failure
+ */
+int video_snapshot_jpeg(int quality, int timeout_ms, uint8_t **data, size_t *len);
+
 #endif //VIDEO_DAEMON_VIDEO_H

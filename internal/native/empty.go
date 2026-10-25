@@ -49,6 +49,10 @@ func (e *EmptyNativeInterface) VideoStart() error {
 	return nil
 }
 
+func (e *EmptyNativeInterface) VideoSnapshot(quality int) ([]byte, error) {
+	return nil, ErrVideoNotStreaming
+}
+
 func (e *EmptyNativeInterface) GetLVGLVersion() (string, error) {
 	return "", nil
 }

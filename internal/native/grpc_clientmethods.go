@@ -3,6 +3,9 @@ package native
 import (
 	"context"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	pb "github.com/jetkvm/kvm/internal/native/proto"
 )
 
@@ -85,6 +88,21 @@ func (c *GRPCClient) VideoStop() error {
 func (c *GRPCClient) VideoStart() error {
 	_, err := c.client.VideoStart(context.Background(), &pb.Empty{})
 	return err
+}
+
+func (c *GRPCClient) VideoSnapshot(quality int) ([]byte, error) {
+	resp, err := c.client.VideoSnapshot(context.Background(), &pb.VideoSnapshotRequest{Quality: int32(quality)})
+	if err != nil {
+		// restore the sentinel errors, which do not survive the gRPC boundary
+		switch status.Code(err) {
+		case codes.FailedPrecondition:
+			return nil, ErrVideoNotStreaming
+		case codes.DeadlineExceeded:
+			return nil, ErrSnapshotTimeout
+		}
+		return nil, err
+	}
+	return resp.Jpeg, nil
 }
 
 // UI methods
