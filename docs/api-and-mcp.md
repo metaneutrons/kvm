@@ -97,12 +97,13 @@ zoomed image maps back to screen coordinates.
 | Tool | What it does |
 |---|---|
 | `screenshot` | The screen as JPEG, or a zoomed region of it. Starts video capture if no browser session runs it, and keeps it running for 30 seconds. |
-| `move_mouse`, `click`, `drag`, `scroll` | Mouse input at screen coordinates. Needs the absolute mouse, which is on by default. |
+| `move_mouse`, `click`, `drag`, `scroll` | Mouse input at screen coordinates. |
 | `press_keys` | Presses keys together, e.g. `["ControlLeft", "KeyC"]`, and holds them for up to 30 seconds. Keys are named after the physical US position, as in `KeyboardEvent.code`; `Ctrl`, `Shift`, `Alt`, `Cmd`, `Win` and `Esc` work as short forms. |
 | `type_text` | Types up to 4096 characters through a keyboard layout. |
 | `get_state` | Video signal, USB, keyboard layout and LEDs, virtual media, power. |
 | `wait` | Waits a number of seconds, or until the screen changes or settles. |
 | `wake_host` | Sends a USB remote wakeup to a sleeping host. |
+| `jiggler` | Turns the mouse jiggler on or off, which keeps the host awake while the agent is idle. The setting is saved and also applies to the web UI. |
 | `power` | Power button, reset or power supply, with the ATX or DC extension. |
 | `mount_media`, `unmount_media` | Attaches an image from a URL or the JetKVM's storage as a USB CD-ROM or disk. |
 
@@ -120,6 +121,17 @@ Points to know:
 - **Typing speed.** Each character takes about 45 milliseconds, so 1000
   characters take about 45 seconds. Clients with a short tool timeout need
   shorter texts.
+- **Relative mouse.** The mouse tools use the absolute mouse, which is on by
+  default and hits every position exactly. If it is disabled in the USB
+  settings, for example for a BIOS that only understands a plain mouse, they
+  fall back to the relative mouse: the pointer is pushed into the top-left
+  corner and moved from there. Since hosts scale and accelerate mouse
+  movement, the first such move measures how far the host moves the pointer,
+  by finding it in the video at two points; this takes about a second and is
+  repeated after 30 minutes or when the resolution changes. On a Mac the
+  pointer then lands within about 1 % of the screen width. If the pointer
+  cannot be found, for example because nothing on screen shows it, the tools
+  move one mouse count per video pixel and say that the position may be off.
 - **Scroll direction.** Positive `delta_y` turns the wheel down. macOS reverses
   the direction with natural scrolling, its default.
 - **Waking the host.** `wake_host` wakes a host from sleep if it allows USB

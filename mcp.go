@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -36,7 +37,13 @@ const (
 	mcpDragSteps   = 10
 	// mcpDragNudge is about one pixel of a 1080p screen in absolute units.
 	mcpDragNudge = 16
-	mcpMaxScroll = 50
+	// Without the absolute mouse, the pointer is pushed into the top-left
+	// corner by mcpRelHome reports of -127 and then moved in steps of at most
+	// mcpRelStep counts, which keeps the host's pointer acceleration low.
+	mcpRelHome     = 40
+	mcpRelStep     = 8
+	mcpRelInterval = 4 * time.Millisecond
+	mcpMaxScroll   = 50
 	// mcpMaxHold allows holding a key through a boot, e.g. Option on a Mac.
 	mcpMaxHold = 30 * time.Second
 	// mcpMaxWait bounds the wait tool.
@@ -172,6 +179,11 @@ func mcpActionDetail(in any) string {
 	switch v := in.(type) {
 	case mcpTypeTextInput:
 		return fmt.Sprintf("%d characters, layout %q", len([]rune(v.Text)), v.Layout)
+	case mcpJigglerInput:
+		if v.Enabled == nil {
+			return "report state"
+		}
+		return fmt.Sprintf("enabled=%t", *v.Enabled)
 	case mcpEmpty:
 		return ""
 	}
@@ -251,6 +263,13 @@ func newMCPServer(screen mcpScreen, readOnly bool) *mcp.Server {
 		Description: "Send a USB remote wakeup signal to wake the host from sleep.",
 		Annotations: mcpInput,
 	}, trackMCP(screen, "wake_host", mcpWakeHost))
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "jiggler",
+		Description: "Turn the JetKVM's mouse jiggler on or off. While it is on, it moves the mouse by a few pixels when no input arrived for a while, " +
+			"which keeps the host from sleeping or locking its screen. The setting is saved on the JetKVM and stays until changed, also for people using the web UI. " +
+			"Without enabled, it only reports the current state.",
+		Annotations: mcpInput,
+	}, trackMCP(screen, "jiggler", mcpJiggler))
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "power",
 		Description: "Use the power extension. With the ATX extension: power-short presses the power button, power-long holds it for five seconds to force off, reset presses reset. " +
@@ -543,16 +562,185 @@ func requireHID() error {
 	return nil
 }
 
-// toAbsMouse converts screen pixels to the absolute mouse's 0 to 32767 range.
-func (s mcpScreen) toAbsMouse(x, y float64) (int, int, error) {
+// mcpPointer moves the host's pointer to screen positions. It uses the
+// absolute mouse, or the relative mouse when the absolute one is disabled in
+// the USB settings, as some BIOS setups need. The relative mouse has no
+// position of its own: the pointer is pushed into the top-left corner first and
+// moved from there by the scale calibrate measured for the host. Without a
+// measurement it assumes one count per video pixel, and the tools say so.
+type mcpPointer struct {
+	w, h           int // screen size of the coordinates
+	videoW, videoH int
+	relative       bool
+	// absolute mouse: the last position sent
+	ax, ay int
+	// relative mouse: counts per screen pixel, whether they were measured,
+	// and the position in counts from the corner once homed
+	gainX, gainY float64
+	calibrated   bool
+	homed        bool
+	cx, cy       int
+}
+
+func (s mcpScreen) pointer() (*mcpPointer, error) {
 	if err := requireHID(); err != nil {
-		return 0, 0, err
+		return nil, err
 	}
-	if !gadget.HasAbsoluteMouse() {
-		return 0, 0, errors.New("the absolute mouse is disabled in the JetKVM's USB settings")
+	videoW, videoH := lastVideoState.Width, lastVideoState.Height
+	w, h := s.size(videoW, videoH)
+	if w <= 0 || h <= 0 {
+		return nil, errors.New("the screen size is unknown because there is no video signal")
 	}
-	screenWidth, screenHeight := s.size(lastVideoState.Width, lastVideoState.Height)
-	return absPosition(x, y, screenWidth, screenHeight)
+	p := &mcpPointer{w: w, h: h, videoW: videoW, videoH: videoH}
+	switch {
+	case gadget.HasAbsoluteMouse():
+	case gadget.HasRelativeMouse():
+		p.relative = true
+	default:
+		return nil, errors.New("both mice are disabled in the JetKVM's USB settings")
+	}
+	return p, nil
+}
+
+// check rejects a position outside the screen before anything is sent.
+func (p *mcpPointer) check(x, y float64) error {
+	_, _, err := absPosition(x, y, p.w, p.h)
+	return err
+}
+
+// moveTo moves the pointer to x,y with buttons held.
+func (p *mcpPointer) moveTo(x, y float64, buttons uint8) error {
+	if !p.relative {
+		ax, ay, err := absPosition(x, y, p.w, p.h)
+		if err != nil {
+			return err
+		}
+		p.ax, p.ay = ax, ay
+		return rpcAbsMouseReport(ax, ay, buttons)
+	}
+	if err := p.check(x, y); err != nil {
+		return err
+	}
+	if !p.homed {
+		if err := p.home(); err != nil {
+			return err
+		}
+	}
+	return p.stepTo(int(math.Round(x*p.gainX)), int(math.Round(y*p.gainY)), buttons)
+}
+
+// home pushes the relative pointer into the top-left corner and sets the
+// scale, measuring it first unless a recent measurement exists.
+func (p *mcpPointer) home() error {
+	if err := p.toCorner(); err != nil {
+		return err
+	}
+
+	scaleX, scaleY, ok := cachedRelScale(p.videoW, p.videoH)
+	if !ok {
+		var err error
+		if scaleX, scaleY, ok, err = p.calibrate(p.videoW, p.videoH); err != nil {
+			return err
+		}
+		if ok {
+			storeRelScale(p.videoW, p.videoH, scaleX, scaleY)
+		} else {
+			scaleX, scaleY = 1, 1
+		}
+	}
+	p.calibrated = ok
+	p.gainX = float64(p.videoW) / float64(p.w) / scaleX
+	p.gainY = float64(p.videoH) / float64(p.h) / scaleY
+	return nil
+}
+
+// toCorner pushes the relative pointer into the top-left corner.
+func (p *mcpPointer) toCorner() error {
+	for range mcpRelHome {
+		if err := rpcRelMouseReport(-127, -127, 0); err != nil {
+			return err
+		}
+	}
+	p.homed, p.cx, p.cy = true, 0, 0
+	return nil
+}
+
+// stepTo moves the relative pointer to a position in counts, in short steps
+// along a straight line.
+func (p *mcpPointer) stepTo(tx, ty int, buttons uint8) error {
+	for p.cx != tx || p.cy != ty {
+		dx, dy := relStep(tx-p.cx, ty-p.cy)
+		if err := rpcRelMouseReport(int8(dx), int8(dy), buttons); err != nil {
+			return err
+		}
+		p.cx += dx
+		p.cy += dy
+		time.Sleep(mcpRelInterval)
+	}
+	return nil
+}
+
+// relStep is the next step of a relative move by dx,dy: about mcpRelStep
+// counts long in any direction. Hosts accelerate by speed, so a diagonal move
+// must not be faster than a straight one, or the calibration, which moves
+// diagonally, would not fit other directions.
+func relStep(dx, dy int) (int, int) {
+	length := math.Hypot(float64(dx), float64(dy))
+	if length <= mcpRelStep {
+		return dx, dy
+	}
+	f := mcpRelStep / length
+	return int(math.Round(float64(dx) * f)), int(math.Round(float64(dy) * f))
+}
+
+// press sets the buttons without moving.
+func (p *mcpPointer) press(buttons uint8) error {
+	if p.relative {
+		return rpcRelMouseReport(0, 0, buttons)
+	}
+	return rpcAbsMouseReport(p.ax, p.ay, buttons)
+}
+
+// nudge moves about one pixel towards x,y with buttons held. The host uses
+// the first movement of a drag to start it and does not move the dragged
+// object by it.
+func (p *mcpPointer) nudge(x, y float64, buttons uint8) error {
+	towards := func(from, to float64, step int) int {
+		switch {
+		case to > from:
+			return step
+		case to < from:
+			return -step
+		}
+		return 0
+	}
+	if p.relative {
+		dx := towards(float64(p.cx), x*p.gainX, 1)
+		dy := towards(float64(p.cy), y*p.gainY, 1)
+		p.cx += dx
+		p.cy += dy
+		return rpcRelMouseReport(int8(dx), int8(dy), buttons)
+	}
+	tx, ty, err := absPosition(x, y, p.w, p.h)
+	if err != nil {
+		return err
+	}
+	p.ax += towards(float64(p.ax), float64(tx), mcpDragNudge)
+	p.ay += towards(float64(p.ay), float64(ty), mcpDragNudge)
+	return rpcAbsMouseReport(p.ax, p.ay, buttons)
+}
+
+// note is added to a tool's answer when the relative mouse was used.
+func (p *mcpPointer) note() string {
+	if !p.relative {
+		return ""
+	}
+	if p.calibrated {
+		return " The absolute mouse is disabled, so the relative mouse moved the pointer from the top-left corner, " +
+			"scaled as measured on this host. It is less exact than the absolute mouse: check the position with a screenshot where precision matters."
+	}
+	return " The absolute mouse is disabled, so the relative mouse moved the pointer from the top-left corner. " +
+		"Measuring how far the host moves the pointer failed, so the position may be off: check it with a screenshot before relying on it."
 }
 
 // absPosition maps a position on a w x h screen to the absolute mouse range.
@@ -593,14 +781,14 @@ type mcpMoveInput struct {
 }
 
 func (s mcpScreen) moveMouse(_ context.Context, _ *mcp.CallToolRequest, in mcpMoveInput) (*mcp.CallToolResult, any, error) {
-	x, y, err := s.toAbsMouse(in.X, in.Y)
+	p, err := s.pointer()
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := rpcAbsMouseReport(x, y, 0); err != nil {
+	if err := p.moveTo(in.X, in.Y, 0); err != nil {
 		return nil, nil, err
 	}
-	return mcpDone("Moved the pointer to %g,%g.", in.X, in.Y)
+	return mcpDone("Moved the pointer to %g,%g.%s", in.X, in.Y, p.note())
 }
 
 type mcpClickInput struct {
@@ -615,7 +803,7 @@ func (s mcpScreen) click(_ context.Context, _ *mcp.CallToolRequest, in mcpClickI
 	if err != nil {
 		return nil, nil, err
 	}
-	x, y, err := s.toAbsMouse(in.X, in.Y)
+	p, err := s.pointer()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -624,7 +812,7 @@ func (s mcpScreen) click(_ context.Context, _ *mcp.CallToolRequest, in mcpClickI
 	if in.Double {
 		clicks = 2
 	}
-	if err := rpcAbsMouseReport(x, y, 0); err != nil {
+	if err := p.moveTo(in.X, in.Y, 0); err != nil {
 		return nil, nil, err
 	}
 	for i := range clicks {
@@ -633,11 +821,11 @@ func (s mcpScreen) click(_ context.Context, _ *mcp.CallToolRequest, in mcpClickI
 		} else {
 			time.Sleep(mcpKeyDelay)
 		}
-		if err := rpcAbsMouseReport(x, y, button); err != nil {
+		if err := p.press(button); err != nil {
 			return nil, nil, err
 		}
 		time.Sleep(mcpClickHold)
-		if err := rpcAbsMouseReport(x, y, 0); err != nil {
+		if err := p.press(0); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -645,7 +833,7 @@ func (s mcpScreen) click(_ context.Context, _ *mcp.CallToolRequest, in mcpClickI
 	if in.Double {
 		action = "Double-clicked"
 	}
-	return mcpDone("%s the %s button at %g,%g.", action, buttonName(in.Button), in.X, in.Y)
+	return mcpDone("%s the %s button at %g,%g.%s", action, buttonName(in.Button), in.X, in.Y, p.note())
 }
 
 func buttonName(name string) string {
@@ -669,53 +857,41 @@ func (s mcpScreen) drag(_ context.Context, _ *mcp.CallToolRequest, in mcpDragInp
 	if err != nil {
 		return nil, nil, err
 	}
-	fromX, fromY, err := s.toAbsMouse(in.FromX, in.FromY)
+	p, err := s.pointer()
 	if err != nil {
 		return nil, nil, err
 	}
-	toX, toY, err := s.toAbsMouse(in.ToX, in.ToY)
-	if err != nil {
+	if err := p.check(in.ToX, in.ToY); err != nil {
 		return nil, nil, err
 	}
 
-	if err := rpcAbsMouseReport(fromX, fromY, 0); err != nil {
+	if err := p.moveTo(in.FromX, in.FromY, 0); err != nil {
 		return nil, nil, err
 	}
 	time.Sleep(mcpKeyDelay)
-	if err := rpcAbsMouseReport(fromX, fromY, button); err != nil {
+	if err := p.press(button); err != nil {
 		return nil, nil, err
 	}
-	// The host uses the first movement to start the drag and does not move
-	// the dragged object by it, so nudge by about a pixel before the path.
 	time.Sleep(mcpKeyDelay)
-	nudge := func(from, to int) int {
-		switch {
-		case to > from:
-			return from + mcpDragNudge
-		case to < from:
-			return from - mcpDragNudge
-		}
-		return from
-	}
-	if err := rpcAbsMouseReport(nudge(fromX, toX), nudge(fromY, toY), button); err != nil {
-		_ = rpcAbsMouseReport(fromX, fromY, 0)
+	if err := p.nudge(in.ToX, in.ToY, button); err != nil {
+		_ = p.press(0)
 		return nil, nil, err
 	}
 	// Intermediate positions let the host recognize the movement as a drag.
 	for i := 1; i <= mcpDragSteps; i++ {
 		time.Sleep(mcpKeyDelay)
-		x := fromX + (toX-fromX)*i/mcpDragSteps
-		y := fromY + (toY-fromY)*i/mcpDragSteps
-		if err := rpcAbsMouseReport(x, y, button); err != nil {
-			_ = rpcAbsMouseReport(x, y, 0)
+		x := in.FromX + (in.ToX-in.FromX)*float64(i)/mcpDragSteps
+		y := in.FromY + (in.ToY-in.FromY)*float64(i)/mcpDragSteps
+		if err := p.moveTo(x, y, button); err != nil {
+			_ = p.press(0)
 			return nil, nil, err
 		}
 	}
 	time.Sleep(mcpClickHold)
-	if err := rpcAbsMouseReport(toX, toY, 0); err != nil {
+	if err := p.press(0); err != nil {
 		return nil, nil, err
 	}
-	return mcpDone("Dragged with the %s button from %g,%g to %g,%g.", buttonName(in.Button), in.FromX, in.FromY, in.ToX, in.ToY)
+	return mcpDone("Dragged with the %s button from %g,%g to %g,%g.%s", buttonName(in.Button), in.FromX, in.FromY, in.ToX, in.ToY, p.note())
 }
 
 type mcpScrollInput struct {
@@ -729,11 +905,11 @@ func (s mcpScreen) scroll(_ context.Context, _ *mcp.CallToolRequest, in mcpScrol
 	if in.DeltaX < -mcpMaxScroll || in.DeltaX > mcpMaxScroll || in.DeltaY < -mcpMaxScroll || in.DeltaY > mcpMaxScroll {
 		return nil, nil, fmt.Errorf("scroll at most %d notches per call; call scroll again for more, or press PageDown, PageUp, Home or End", mcpMaxScroll)
 	}
-	x, y, err := s.toAbsMouse(in.X, in.Y)
+	p, err := s.pointer()
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := rpcAbsMouseReport(x, y, 0); err != nil {
+	if err := p.moveTo(in.X, in.Y, 0); err != nil {
 		return nil, nil, err
 	}
 
@@ -757,7 +933,7 @@ func (s mcpScreen) scroll(_ context.Context, _ *mcp.CallToolRequest, in mcpScrol
 		dy -= int(sy)
 		dx -= int(sx)
 	}
-	return mcpDone("Turned the wheel delta_y=%d, delta_x=%d at %g,%g. Take a screenshot to see which way the host scrolled.", in.DeltaY, in.DeltaX, in.X, in.Y)
+	return mcpDone("Turned the wheel delta_y=%d, delta_x=%d at %g,%g. Take a screenshot to see which way the host scrolled.%s", in.DeltaY, in.DeltaX, in.X, in.Y, p.note())
 }
 
 // keyAliases are short forms models tend to use for the modifier keys.
@@ -895,6 +1071,7 @@ type mcpState struct {
 	PowerExtension   string                   `json:"power_extension,omitempty"`
 	ATX              *ATXState                `json:"atx,omitempty"`
 	DC               *DCPowerState            `json:"dc,omitempty"`
+	Jiggler          bool                     `json:"jiggler"`
 	AvailableLayouts []string                 `json:"available_layouts"`
 }
 
@@ -903,6 +1080,7 @@ func mcpGetState(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.Ca
 		Video:            lastVideoState,
 		KeyboardLayout:   config.KeyboardLayout,
 		PowerExtension:   config.ActiveExtension,
+		Jiggler:          config.JigglerEnabled,
 		AvailableLayouts: keyboard.LayoutCodes(),
 	}
 	if gadget != nil {
@@ -920,6 +1098,35 @@ func mcpGetState(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.Ca
 		state.DC = &dc
 	}
 	return nil, state, nil
+}
+
+type mcpJigglerInput struct {
+	Enabled *bool `json:"enabled,omitempty" jsonschema:"true to turn the jiggler on, false to turn it off; leave out to only report the state"`
+}
+
+func mcpJiggler(_ context.Context, _ *mcp.CallToolRequest, in mcpJigglerInput) (*mcp.CallToolResult, any, error) {
+	if in.Enabled != nil {
+		if err := rpcSetJigglerState(*in.Enabled); err != nil {
+			return nil, nil, err
+		}
+	}
+	if !config.JigglerEnabled {
+		return mcpDone("The jiggler is off.")
+	}
+	jiggler := config.JigglerConfig
+	if jiggler == nil {
+		return mcpDone("The jiggler is on.")
+	}
+	text := fmt.Sprintf("The jiggler is on: it moves the mouse after %d seconds without input, checked on the schedule %q",
+		jiggler.InactivityLimitSeconds, jiggler.ScheduleCronTab)
+	if jiggler.Timezone != "" {
+		text += " in " + jiggler.Timezone
+	}
+	text += "."
+	if gadget != nil && !gadget.HasRelativeMouse() {
+		text += " It needs the relative mouse, which is disabled in the JetKVM's USB settings, so it has no effect."
+	}
+	return mcpDone("%s", text)
 }
 
 func mcpWakeHost(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.CallToolResult, any, error) {

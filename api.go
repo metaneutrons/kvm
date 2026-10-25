@@ -87,6 +87,8 @@ var apiRPCMethods = map[string]bool{
 	"wheelReport":            true,
 	"wakeHost":               true,
 	"getJigglerState":        true,
+	"setJigglerState":        true,
+	"getJigglerConfig":       true,
 	"getVirtualMediaState":   true,
 	"getStorageSpace":        true,
 	"listStorageFiles":       true,

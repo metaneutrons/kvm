@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"image"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -58,7 +59,7 @@ func TestMCPListsTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		names = append(names, tool.Name)
 	}
-	for _, want := range []string{"screenshot", "move_mouse", "click", "drag", "scroll", "press_keys", "type_text", "get_state", "wait", "wake_host", "power", "mount_media", "unmount_media"} {
+	for _, want := range []string{"screenshot", "move_mouse", "click", "drag", "scroll", "press_keys", "type_text", "get_state", "wait", "wake_host", "jiggler", "power", "mount_media", "unmount_media"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("tool %s is missing from %v", want, names)
 		}
@@ -119,6 +120,88 @@ func TestMCPRequiresAuth(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("cross-site request with cookie: status %d, want 403", w.Code)
+	}
+}
+
+// testFrame returns a frame of uniform brightness with dark squares of size
+// px at the given points.
+func testFrame(w, h int, base uint8, size int, at ...image.Point) *image.YCbCr {
+	img := image.NewYCbCr(image.Rect(0, 0, w, h), image.YCbCrSubsampleRatio420)
+	for i := range img.Y {
+		img.Y[i] = base
+	}
+	for _, p := range at {
+		for y := p.Y; y < p.Y+size && y < h; y++ {
+			for x := p.X; x < p.X+size && x < w; x++ {
+				img.Y[img.YOffset(x, y)] = 0
+			}
+		}
+	}
+	return img
+}
+
+func TestChangedAreas(t *testing.T) {
+	// The pointer is in the corner, at the first point and at the second
+	// point; the third frame also has a small speck of noise and a large
+	// change elsewhere, such as a clock.
+	corner := testFrame(200, 150, 200, 8, image.Point{})
+	first := testFrame(200, 150, 200, 8, image.Point{X: 61, Y: 41})
+	second := testFrame(200, 150, 200, 8, image.Point{X: 181, Y: 121}, image.Point{X: 10, Y: 100})
+	second.Y[second.YOffset(5, 5)] = 0
+
+	atFirst := changedAreas(first, corner, second)
+	if len(atFirst) != 1 || atFirst[0] != (image.Point{X: 61, Y: 41}) {
+		t.Fatalf("areas at the first point = %v", atFirst)
+	}
+	atSecond := changedAreas(second, corner, first)
+	if len(atSecond) != 2 {
+		t.Fatalf("areas at the second point = %v, want the pointer and the clock", atSecond)
+	}
+
+	// 60 pixels per 100 counts, offset 1 pixel; the clock does not fit.
+	sx, sy, ok := pointerScale(atFirst, atSecond, 100, 300)
+	if !ok || math.Abs(sx-0.6) > 1e-9 || math.Abs(sy-0.4) > 1e-9 {
+		t.Fatalf("pointerScale = %g, %g, %v, want 0.6, 0.4, true", sx, sy, ok)
+	}
+
+	// Areas that move backwards or sit far off the line are no pointer.
+	if _, _, ok := pointerScale([]image.Point{{X: 100, Y: 100}}, []image.Point{{X: 50, Y: 50}}, 100, 300); ok {
+		t.Error("pointerScale accepted a pointer moving backwards")
+	}
+	if _, _, ok := pointerScale([]image.Point{{X: 150, Y: 150}}, []image.Point{{X: 200, Y: 200}}, 100, 300); ok {
+		t.Error("pointerScale accepted a hotspot offset of 125 pixels")
+	}
+}
+
+func TestRelStep(t *testing.T) {
+	tests := []struct {
+		dx, dy, wantX, wantY int
+	}{
+		{0, 0, 0, 0},
+		{5, -3, 5, -3},
+		{8, 0, 8, 0},
+		{8, 8, 6, 6},
+		{100, 0, 8, 0},
+		{-100, 50, -7, 4},
+		{30, -90, 3, -8},
+	}
+	for _, tt := range tests {
+		x, y := relStep(tt.dx, tt.dy)
+		if x != tt.wantX || y != tt.wantY {
+			t.Errorf("relStep(%d, %d) = %d, %d, want %d, %d", tt.dx, tt.dy, x, y, tt.wantX, tt.wantY)
+		}
+	}
+
+	// Stepping always arrives, also where the shorter axis rounds to zero.
+	for _, d := range [][2]int{{1000, 1}, {-7, 999}, {123, -456}} {
+		cx, cy, n := 0, 0, 0
+		for cx != d[0] || cy != d[1] {
+			sx, sy := relStep(d[0]-cx, d[1]-cy)
+			cx, cy, n = cx+sx, cy+sy, n+1
+			if n > 1000 {
+				t.Fatalf("stepping to %v did not arrive", d)
+			}
+		}
 	}
 }
 
