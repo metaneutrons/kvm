@@ -910,18 +910,41 @@ func handleSendWOLMagicPacket(c *gin.Context) {
 	c.String(http.StatusOK, "WOL sent to %s ", macAddr)
 }
 
+// handleVideoSnapshot serves the current HDMI frame as JPEG. Optional query
+// parameters: quality (1-99); x, y, w and h select a region in video pixels;
+// width scales the image down to that width, keeping the aspect ratio.
 func handleVideoSnapshot(c *gin.Context) {
-	quality := native.DefaultSnapshotQuality
-	if q := c.Query("quality"); q != "" {
-		v, err := strconv.Atoi(q)
-		if err != nil || v < 1 || v > 99 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "quality must be between 1 and 99"})
+	opts := native.SnapshotOptions{Quality: native.DefaultSnapshotQuality}
+	params := []struct {
+		name     string
+		dst      *int
+		min, max int
+	}{
+		{"quality", &opts.Quality, 1, 99},
+		{"x", &opts.CropX, 0, 1 << 15},
+		{"y", &opts.CropY, 0, 1 << 15},
+		{"w", &opts.CropWidth, 16, 1 << 15},
+		{"h", &opts.CropHeight, 16, 1 << 15},
+		{"width", &opts.Width, 16, 1 << 15},
+	}
+	for _, p := range params {
+		raw := c.Query(p.name)
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < p.min || v > p.max {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s must be between %d and %d", p.name, p.min, p.max)})
 			return
 		}
-		quality = v
+		*p.dst = v
+	}
+	if (opts.CropWidth == 0) != (opts.CropHeight == 0) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "a region needs both w and h"})
+		return
 	}
 
-	jpeg, err := takeVideoSnapshot(quality)
+	jpeg, err := takeVideoSnapshot(opts)
 	var noSignal errNoVideoSignal
 	switch {
 	case errors.As(err, &noSignal):
@@ -932,6 +955,9 @@ func handleVideoSnapshot(c *gin.Context) {
 		return
 	case errors.Is(err, native.ErrSnapshotTimeout):
 		c.JSON(http.StatusGatewayTimeout, gin.H{"error": err.Error()})
+		return
+	case errors.Is(err, native.ErrSnapshotInvalid):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "the region is outside the video or too small to scale this far"})
 		return
 	case err != nil:
 		logger.Warn().Err(err).Msg("failed to take video snapshot")

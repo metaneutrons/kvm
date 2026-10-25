@@ -100,12 +100,22 @@ func (s *grpcServer) VideoStart(ctx context.Context, req *pb.Empty) (*pb.Empty, 
 }
 
 func (s *grpcServer) VideoSnapshot(ctx context.Context, req *pb.VideoSnapshotRequest) (*pb.VideoSnapshotResponse, error) {
-	jpeg, err := s.native.VideoSnapshot(int(req.Quality))
+	jpeg, err := s.native.VideoSnapshot(SnapshotOptions{
+		Quality:    int(req.Quality),
+		CropX:      int(req.CropX),
+		CropY:      int(req.CropY),
+		CropWidth:  int(req.CropWidth),
+		CropHeight: int(req.CropHeight),
+		Width:      int(req.Width),
+		Height:     int(req.Height),
+	})
 	switch {
 	case errors.Is(err, ErrVideoNotStreaming):
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, ErrSnapshotTimeout):
 		return nil, status.Error(codes.DeadlineExceeded, err.Error())
+	case errors.Is(err, ErrSnapshotInvalid):
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	case err != nil:
 		return nil, status.Error(codes.Internal, err.Error())
 	}

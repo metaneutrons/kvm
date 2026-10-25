@@ -606,7 +606,7 @@ func (p *NativeProxy) VideoStart() error {
 	})
 }
 
-func (p *NativeProxy) VideoSnapshot(quality int) ([]byte, error) {
+func (p *NativeProxy) VideoSnapshot(opts SnapshotOptions) ([]byte, error) {
 	p.clientMu.RLock()
 	defer p.clientMu.RUnlock()
 
@@ -614,7 +614,7 @@ func (p *NativeProxy) VideoSnapshot(quality int) ([]byte, error) {
 		return nil, fmt.Errorf("gRPC client not initialized")
 	}
 
-	return p.client.VideoSnapshot(quality)
+	return p.client.VideoSnapshot(opts)
 }
 
 func (p *NativeProxy) GetLVGLVersion() (string, error) {

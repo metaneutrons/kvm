@@ -403,8 +403,8 @@ int jetkvm_video_get_codec_type() {
     return video_get_codec_type();
 }
 
-int jetkvm_video_snapshot_jpeg(int quality, int timeout_ms, uint8_t **data, size_t *len) {
-    return video_snapshot_jpeg(quality, timeout_ms, data, len);
+int jetkvm_video_snapshot_jpeg(const jetkvm_snapshot_params_t *params, int timeout_ms, uint8_t **data, size_t *len) {
+    return video_snapshot_jpeg(params, timeout_ms, data, len);
 }
 
 int jetkvm_video_set_edid(const char *edid_hex) {

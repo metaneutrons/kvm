@@ -138,7 +138,7 @@ func expireVideoLease() {
 
 // takeVideoSnapshot encodes the current HDMI frame as JPEG, starting capture
 // first if no session runs it.
-func takeVideoSnapshot(quality int) ([]byte, error) {
+func takeVideoSnapshot(opts native.SnapshotOptions) ([]byte, error) {
 	displayWoken, err := acquireVideoLease()
 	if err != nil {
 		return nil, err
@@ -150,7 +150,7 @@ func takeVideoSnapshot(quality int) ([]byte, error) {
 	}
 
 	for {
-		jpeg, err := nativeInstance.VideoSnapshot(quality)
+		jpeg, err := nativeInstance.VideoSnapshot(opts)
 		if !errors.Is(err, native.ErrVideoNotStreaming) {
 			return jpeg, err
 		}

@@ -113,6 +113,12 @@ message VideoLogStatusResponse {
 
 message VideoSnapshotRequest {
   int32 quality = 1;
+  int32 crop_x = 2;
+  int32 crop_y = 3;
+  int32 crop_width = 4;
+  int32 crop_height = 5;
+  int32 width = 6;
+  int32 height = 7;
 }
 
 message VideoSnapshotResponse {

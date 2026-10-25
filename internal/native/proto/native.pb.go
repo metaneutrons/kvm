@@ -673,6 +673,12 @@ func (x *VideoLogStatusResponse) GetStatus() string {
 type VideoSnapshotRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Quality       int32                  `protobuf:"varint,1,opt,name=quality,proto3" json:"quality,omitempty"`
+	CropX         int32                  `protobuf:"varint,2,opt,name=crop_x,json=cropX,proto3" json:"crop_x,omitempty"`
+	CropY         int32                  `protobuf:"varint,3,opt,name=crop_y,json=cropY,proto3" json:"crop_y,omitempty"`
+	CropWidth     int32                  `protobuf:"varint,4,opt,name=crop_width,json=cropWidth,proto3" json:"crop_width,omitempty"`
+	CropHeight    int32                  `protobuf:"varint,5,opt,name=crop_height,json=cropHeight,proto3" json:"crop_height,omitempty"`
+	Width         int32                  `protobuf:"varint,6,opt,name=width,proto3" json:"width,omitempty"`
+	Height        int32                  `protobuf:"varint,7,opt,name=height,proto3" json:"height,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -710,6 +716,48 @@ func (*VideoSnapshotRequest) Descriptor() ([]byte, []int) {
 func (x *VideoSnapshotRequest) GetQuality() int32 {
 	if x != nil {
 		return x.Quality
+	}
+	return 0
+}
+
+func (x *VideoSnapshotRequest) GetCropX() int32 {
+	if x != nil {
+		return x.CropX
+	}
+	return 0
+}
+
+func (x *VideoSnapshotRequest) GetCropY() int32 {
+	if x != nil {
+		return x.CropY
+	}
+	return 0
+}
+
+func (x *VideoSnapshotRequest) GetCropWidth() int32 {
+	if x != nil {
+		return x.CropWidth
+	}
+	return 0
+}
+
+func (x *VideoSnapshotRequest) GetCropHeight() int32 {
+	if x != nil {
+		return x.CropHeight
+	}
+	return 0
+}
+
+func (x *VideoSnapshotRequest) GetWidth() int32 {
+	if x != nil {
+		return x.Width
+	}
+	return 0
+}
+
+func (x *VideoSnapshotRequest) GetHeight() int32 {
+	if x != nil {
+		return x.Height
 	}
 	return 0
 }
@@ -2484,9 +2532,17 @@ const file_internal_native_proto_native_proto_rawDesc = "" +
 	"\x14VideoGetEDIDResponse\x12\x12\n" +
 	"\x04edid\x18\x01 \x01(\tR\x04edid\"0\n" +
 	"\x16VideoLogStatusResponse\x12\x16\n" +
-	"\x06status\x18\x01 \x01(\tR\x06status\"0\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status\"\xcc\x01\n" +
 	"\x14VideoSnapshotRequest\x12\x18\n" +
-	"\aquality\x18\x01 \x01(\x05R\aquality\"+\n" +
+	"\aquality\x18\x01 \x01(\x05R\aquality\x12\x15\n" +
+	"\x06crop_x\x18\x02 \x01(\x05R\x05cropX\x12\x15\n" +
+	"\x06crop_y\x18\x03 \x01(\x05R\x05cropY\x12\x1d\n" +
+	"\n" +
+	"crop_width\x18\x04 \x01(\x05R\tcropWidth\x12\x1f\n" +
+	"\vcrop_height\x18\x05 \x01(\x05R\n" +
+	"cropHeight\x12\x14\n" +
+	"\x05width\x18\x06 \x01(\x05R\x05width\x12\x16\n" +
+	"\x06height\x18\a \x01(\x05R\x06height\"+\n" +
 	"\x15VideoSnapshotResponse\x12\x12\n" +
 	"\x04jpeg\x18\x01 \x01(\fR\x04jpeg\"2\n" +
 	"\x16GetLVGLVersionResponse\x12\x18\n" +

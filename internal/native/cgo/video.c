@@ -348,7 +348,8 @@ static int32_t venc_stop()
  * The capture delivers limited-range YCbCr (BT.709 for HD), while JPEG decoders
  * assume full-range BT.601. Encoding the frame as is gives grey blacks and shifted
  * hues, so the RGA first converts it to full-range RGB (about 5ms at 1080p) and the
- * JPEG is encoded from that.
+ * JPEG is encoded from that. The same RGA pass crops and scales, so a smaller or
+ * partial snapshot costs less to encode instead of more.
  */
 static pthread_once_t snapshot_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t snapshot_request_mutex = PTHREAD_MUTEX_INITIALIZER; // one request at a time
@@ -356,16 +357,19 @@ static pthread_mutex_t snapshot_mutex = PTHREAD_MUTEX_INITIALIZER;         // gu
 static pthread_cond_t snapshot_cond;
 static bool snapshot_pending = false;
 static uint32_t snapshot_generation = 0;
-static int snapshot_quality = 0;
+static jetkvm_snapshot_params_t snapshot_params;
 static int snapshot_result = 0;
 static uint8_t *snapshot_data = NULL;
 static size_t snapshot_len = 0;
 
 // owned by the capture thread
 static bool jpeg_chn_created = false;
+static RK_U32 jpeg_chn_width = 0;
+static RK_U32 jpeg_chn_height = 0;
 static int jpeg_chn_quality = 0;
 static MB_POOL jpeg_rgb_pool = MB_INVALID_POOLID;
 static MB_BLK jpeg_rgb_blk = RK_NULL;
+static RK_U64 jpeg_rgb_size = 0;
 
 static void snapshot_init()
 {
@@ -389,17 +393,34 @@ static void jpeg_rgb_release()
         RK_MPI_MB_DestroyPool(jpeg_rgb_pool);
         jpeg_rgb_pool = MB_INVALID_POOLID;
     }
+    jpeg_rgb_size = 0;
 }
 
-static int jpeg_chn_prepare(RK_U32 width, RK_U32 height, int quality)
+static void jpeg_chn_destroy();
+
+// Prepares the RGB buffer for a frame of frame_width x frame_height, which is
+// the largest snapshot it can produce, and the JPEG channel for a picture of
+// width x height. The channel is recreated when the picture size changes.
+static int jpeg_chn_prepare(RK_U32 frame_width, RK_U32 frame_height, RK_U32 width, RK_U32 height, int quality)
 {
     int32_t ret;
 
-    if (!jpeg_chn_created)
+    if (jpeg_chn_created && (width != jpeg_chn_width || height != jpeg_chn_height))
+    {
+        jpeg_chn_destroy();
+    }
+
+    RK_U64 rgb_size = (RK_U64)RK_ALIGN_16(frame_width) * RK_ALIGN_16(frame_height) * 3;
+    if (jpeg_rgb_blk != RK_NULL && rgb_size > jpeg_rgb_size)
+    {
+        jpeg_rgb_release();
+    }
+
+    if (jpeg_rgb_blk == RK_NULL)
     {
         MB_POOL_CONFIG_S stMbPoolCfg;
         memset(&stMbPoolCfg, 0, sizeof(MB_POOL_CONFIG_S));
-        stMbPoolCfg.u64MBSize = (RK_U64)RK_ALIGN_16(width) * RK_ALIGN_16(height) * 3;
+        stMbPoolCfg.u64MBSize = rgb_size;
         stMbPoolCfg.u32MBCnt = 1;
         stMbPoolCfg.enAllocType = MB_ALLOC_TYPE_DMA;
         stMbPoolCfg.bPreAlloc = RK_TRUE;
@@ -417,7 +438,11 @@ static int jpeg_chn_prepare(RK_U32 width, RK_U32 height, int quality)
             jpeg_rgb_pool = MB_INVALID_POOLID;
             return VIDEO_SNAPSHOT_ERR_NOMEM;
         }
+        jpeg_rgb_size = rgb_size;
+    }
 
+    if (!jpeg_chn_created)
+    {
         VENC_CHN_ATTR_S stAttr;
         memset(&stAttr, 0, sizeof(VENC_CHN_ATTR_S));
         stAttr.stVencAttr.enType = RK_VIDEO_ID_JPEG;
@@ -433,10 +458,11 @@ static int jpeg_chn_prepare(RK_U32 width, RK_U32 height, int quality)
         if (ret != RK_SUCCESS)
         {
             log_error("RK_MPI_VENC_CreateChn(JPEG) failed: %#x", ret);
-            jpeg_rgb_release();
             return VIDEO_SNAPSHOT_ERR_ENCODE;
         }
         jpeg_chn_created = true;
+        jpeg_chn_width = width;
+        jpeg_chn_height = height;
         jpeg_chn_quality = 0;
         log_info("created JPEG snapshot channel %ux%u", width, height);
     }
@@ -474,34 +500,114 @@ static void jpeg_chn_destroy()
     jpeg_chn_created = false;
 }
 
-static int jpeg_encode_frame(VIDEO_FRAME_INFO_S *frame, int quality, uint8_t **data, size_t *len)
+// Smallest snapshot side; the RGA cannot scale down by more than 16 times.
+#define SNAPSHOT_MIN_SIZE 16
+
+// Fits the requested region and size to the frame: the region is clamped to
+// the frame and aligned to even pixels, as YUYV packs two pixels together,
+// and the picture is no larger than the region.
+static int snapshot_geometry(const jetkvm_snapshot_params_t *p, RK_U32 frame_width, RK_U32 frame_height,
+                             im_rect *crop, RK_U32 *out_width, RK_U32 *out_height)
 {
-    int ret = jpeg_chn_prepare(frame->stVFrame.u32Width, frame->stVFrame.u32Height, quality);
+    int x = p->crop_x, y = p->crop_y, w = p->crop_width, h = p->crop_height;
+    if (w <= 0 || h <= 0)
+    {
+        x = 0;
+        y = 0;
+        w = (int)frame_width;
+        h = (int)frame_height;
+    }
+    if (x < 0 || y < 0 || x >= (int)frame_width || y >= (int)frame_height)
+    {
+        return VIDEO_SNAPSHOT_ERR_INVALID;
+    }
+    if (x + w > (int)frame_width)
+        w = (int)frame_width - x;
+    if (y + h > (int)frame_height)
+        h = (int)frame_height - y;
+    x &= ~1;
+    w &= ~1;
+    h &= ~1;
+    if (w < SNAPSHOT_MIN_SIZE || h < SNAPSHOT_MIN_SIZE)
+    {
+        return VIDEO_SNAPSHOT_ERR_INVALID;
+    }
+
+    // A single given side keeps the region's aspect ratio.
+    int ow = p->out_width, oh = p->out_height;
+    if (ow > 0 && oh <= 0)
+        oh = (int)(((long long)h * ow + w / 2) / w);
+    else if (oh > 0 && ow <= 0)
+        ow = (int)(((long long)w * oh + h / 2) / h);
+    if (ow <= 0 || ow > w)
+        ow = w;
+    if (oh <= 0 || oh > h)
+        oh = h;
+    ow &= ~1;
+    oh &= ~1;
+    if (ow < SNAPSHOT_MIN_SIZE || oh < SNAPSHOT_MIN_SIZE || ow * 16 < w || oh * 16 < h)
+    {
+        return VIDEO_SNAPSHOT_ERR_INVALID;
+    }
+
+    crop->x = x;
+    crop->y = y;
+    crop->width = w;
+    crop->height = h;
+    *out_width = (RK_U32)ow;
+    *out_height = (RK_U32)oh;
+    return 0;
+}
+
+static int jpeg_encode_frame(VIDEO_FRAME_INFO_S *frame, const jetkvm_snapshot_params_t *params,
+                             uint8_t **data, size_t *len)
+{
+    RK_U32 frame_width = frame->stVFrame.u32Width;
+    RK_U32 frame_height = frame->stVFrame.u32Height;
+
+    im_rect crop;
+    RK_U32 width, height;
+    int ret = snapshot_geometry(params, frame_width, frame_height, &crop, &width, &height);
     if (ret != 0)
     {
         return ret;
     }
 
-    RK_U32 width = frame->stVFrame.u32Width;
-    RK_U32 height = frame->stVFrame.u32Height;
-    RK_U32 vir_width = frame->stVFrame.u32VirWidth;
-    RK_U32 vir_height = frame->stVFrame.u32VirHeight;
+    ret = jpeg_chn_prepare(frame_width, frame_height, width, height, params->quality);
+    if (ret != 0)
+    {
+        return ret;
+    }
 
-    rga_buffer_t src = wrapbuffer_fd_t(RK_MPI_MB_Handle2Fd(frame->stVFrame.pMbBlk),
-                                       width, height, vir_width, vir_height, RK_FORMAT_YUYV_422);
-    rga_buffer_t dst = wrapbuffer_fd_t(RK_MPI_MB_Handle2Fd(jpeg_rgb_blk),
-                                       width, height, vir_width, vir_height, RK_FORMAT_RGB_888);
-    int csc_mode = is_hd_video(height) ? IM_YUV_TO_RGB_BT709_LIMIT : IM_YUV_TO_RGB_BT601_LIMIT;
-    IM_STATUS im_ret = imcvtcolor_t(src, dst, RK_FORMAT_YUYV_422, RK_FORMAT_RGB_888, csc_mode, 1);
+    RK_U32 vir_width = RK_ALIGN_16(width);
+    RK_U32 vir_height = RK_ALIGN_16(height);
+    rga_buffer_t src = wrapbuffer_fd_t(RK_MPI_MB_Handle2Fd(frame->stVFrame.pMbBlk), frame_width, frame_height,
+                                       frame->stVFrame.u32VirWidth, frame->stVFrame.u32VirHeight,
+                                       RK_FORMAT_YUYV_422);
+    rga_buffer_t dst = wrapbuffer_fd_t(RK_MPI_MB_Handle2Fd(jpeg_rgb_blk), width, height, vir_width, vir_height,
+                                       RK_FORMAT_RGB_888);
+    // Colour conversion, crop and scale in one pass, as imcvtcolor_t does it
+    // for the whole frame.
+    dst.color_space_mode = is_hd_video(frame_height) ? IM_YUV_TO_RGB_BT709_LIMIT : IM_YUV_TO_RGB_BT601_LIMIT;
+    rga_buffer_t pat;
+    memset(&pat, 0, sizeof(pat));
+    im_rect drect = {0, 0, (int)width, (int)height};
+    im_rect prect;
+    memset(&prect, 0, sizeof(prect));
+    IM_STATUS im_ret = improcess(src, dst, pat, crop, drect, prect, IM_SYNC);
     if (im_ret != IM_STATUS_SUCCESS)
     {
-        log_error("RGA colour conversion for snapshot failed: %s", imStrError_t(im_ret));
+        log_error("RGA conversion for snapshot failed: %s", imStrError_t(im_ret));
         return VIDEO_SNAPSHOT_ERR_ENCODE;
     }
 
     VIDEO_FRAME_INFO_S rgb_frame = *frame;
     rgb_frame.stVFrame.pMbBlk = jpeg_rgb_blk;
     rgb_frame.stVFrame.enPixelFormat = RK_FMT_RGB888;
+    rgb_frame.stVFrame.u32Width = width;
+    rgb_frame.stVFrame.u32Height = height;
+    rgb_frame.stVFrame.u32VirWidth = vir_width;
+    rgb_frame.stVFrame.u32VirHeight = vir_height;
 
     VENC_RECV_PIC_PARAM_S stRecvParam;
     memset(&stRecvParam, 0, sizeof(VENC_RECV_PIC_PARAM_S));
@@ -565,7 +671,7 @@ static void snapshot_handle_frame(VIDEO_FRAME_INFO_S *frame)
     pthread_mutex_lock(&snapshot_mutex);
     bool pending = snapshot_pending;
     uint32_t generation = snapshot_generation;
-    int quality = snapshot_quality;
+    jetkvm_snapshot_params_t params = snapshot_params;
     pthread_mutex_unlock(&snapshot_mutex);
 
     if (!pending)
@@ -576,7 +682,7 @@ static void snapshot_handle_frame(VIDEO_FRAME_INFO_S *frame)
     uint8_t *data = NULL;
     size_t len = 0;
     RK_U64 start = get_us();
-    int ret = jpeg_encode_frame(frame, quality, &data, &len);
+    int ret = jpeg_encode_frame(frame, &params, &data, &len);
     log_trace("snapshot encoded: ret=%d len=%zu in %lluus", ret, len, get_us() - start);
 
     pthread_mutex_lock(&snapshot_mutex);
@@ -614,13 +720,13 @@ static void snapshot_stop()
     jpeg_rgb_release();
 }
 
-int video_snapshot_jpeg(int quality, int timeout_ms, uint8_t **data, size_t *len)
+int video_snapshot_jpeg(const jetkvm_snapshot_params_t *params, int timeout_ms, uint8_t **data, size_t *len)
 {
     pthread_once(&snapshot_once, snapshot_init);
 
     *data = NULL;
     *len = 0;
-    if (quality < 1 || quality > 99)
+    if (params == NULL || params->quality < 1 || params->quality > 99)
     {
         return VIDEO_SNAPSHOT_ERR_INVALID;
     }
@@ -636,7 +742,7 @@ int video_snapshot_jpeg(int quality, int timeout_ms, uint8_t **data, size_t *len
     }
 
     snapshot_generation++;
-    snapshot_quality = quality;
+    snapshot_params = *params;
     snapshot_result = VIDEO_SNAPSHOT_ERR_TIMEOUT;
     snapshot_data = NULL;
     snapshot_len = 0;

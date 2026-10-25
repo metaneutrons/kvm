@@ -49,7 +49,7 @@ func (e *EmptyNativeInterface) VideoStart() error {
 	return nil
 }
 
-func (e *EmptyNativeInterface) VideoSnapshot(quality int) ([]byte, error) {
+func (e *EmptyNativeInterface) VideoSnapshot(opts SnapshotOptions) ([]byte, error) {
 	return nil, ErrVideoNotStreaming
 }
 

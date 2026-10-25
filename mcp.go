@@ -149,7 +149,7 @@ func mcpScreenshot(_ context.Context, _ *mcp.CallToolRequest, in mcpScreenshotIn
 		return nil, nil, errors.New("quality must be between 1 and 99")
 	}
 
-	image, err := takeVideoSnapshot(quality)
+	image, err := takeVideoSnapshot(native.SnapshotOptions{Quality: quality})
 	var noSignal errNoVideoSignal
 	switch {
 	case errors.As(err, &noSignal):

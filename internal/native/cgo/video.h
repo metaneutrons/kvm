@@ -1,6 +1,8 @@
 #ifndef VIDEO_DAEMON_VIDEO_H
 #define VIDEO_DAEMON_VIDEO_H
 
+#include "ctrl.h"
+
 /**
  * @brief Initialize the video subsystem
  *
@@ -68,12 +70,12 @@ int video_get_codec_type();
  * Blocks until the capture thread has encoded a frame or the timeout expires.
  * Requires the video stream to be running.
  *
- * @param quality JPEG quality factor, 1-99
+ * @param params Quality, region and size of the snapshot (jetkvm_snapshot_params_t in ctrl.h)
  * @param timeout_ms Maximum time to wait for a frame
  * @param data Receives a malloc'd buffer with the JPEG data, to be freed by the caller
  * @param len Receives the length of the JPEG data
  * @return int 0 on success, one of VIDEO_SNAPSHOT_ERR_* (ctrl.h) on failure
  */
-int video_snapshot_jpeg(int quality, int timeout_ms, uint8_t **data, size_t *len);
+int video_snapshot_jpeg(const jetkvm_snapshot_params_t *params, int timeout_ms, uint8_t **data, size_t *len);
 
 #endif //VIDEO_DAEMON_VIDEO_H

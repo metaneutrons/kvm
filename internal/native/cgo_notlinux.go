@@ -135,7 +135,7 @@ func videoSetEDID(edid string) error {
 	return nil
 }
 
-func videoSnapshotJPEG(quality int, timeout time.Duration) ([]byte, error) {
+func videoSnapshotJPEG(opts SnapshotOptions, timeout time.Duration) ([]byte, error) {
 	panicPlatformNotSupported()
 	return nil, nil
 }

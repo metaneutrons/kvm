@@ -34,7 +34,23 @@ var (
 	ErrVideoNotStreaming = errors.New("video is not streaming")
 	// ErrSnapshotTimeout is returned when no frame was encoded within the snapshot timeout.
 	ErrSnapshotTimeout = errors.New("timed out waiting for a video frame")
+	// ErrSnapshotInvalid is returned for a quality, region or size the snapshot cannot use.
+	ErrSnapshotInvalid = errors.New("invalid snapshot quality, region or size")
 )
+
+// SnapshotOptions select the quality, the part of the frame and the size of a
+// snapshot. The zero value takes the whole frame at its own size.
+type SnapshotOptions struct {
+	// Quality is the JPEG quality factor, 1-99; 0 selects DefaultSnapshotQuality.
+	Quality int
+	// CropX, CropY, CropWidth and CropHeight are the region in frame pixels. A
+	// zero CropWidth takes the whole frame. The region is clipped to the frame.
+	CropX, CropY, CropWidth, CropHeight int
+	// Width and Height are the size of the JPEG. With only one of them set,
+	// the other keeps the region's aspect ratio; with neither, the JPEG has the
+	// size of the region. It is never larger than the region.
+	Width, Height int
+}
 
 // VideoState is the state of the video stream.
 type VideoState struct {
@@ -255,14 +271,14 @@ func (n *Native) VideoStart() error {
 	return nil
 }
 
-// VideoSnapshot encodes the next captured frame as JPEG. quality is 1-99, 0 selects
-// DefaultSnapshotQuality. It does not take videoLock, so a snapshot is not held up by
-// a slow stream reconfiguration; the native side handles the stream stopping meanwhile.
-func (n *Native) VideoSnapshot(quality int) ([]byte, error) {
-	if quality == 0 {
-		quality = DefaultSnapshotQuality
+// VideoSnapshot encodes the next captured frame as JPEG. It does not take
+// videoLock, so a snapshot is not held up by a slow stream reconfiguration; the
+// native side handles the stream stopping meanwhile.
+func (n *Native) VideoSnapshot(opts SnapshotOptions) ([]byte, error) {
+	if opts.Quality == 0 {
+		opts.Quality = DefaultSnapshotQuality
 	}
-	return videoSnapshotJPEG(quality, snapshotTimeout)
+	return videoSnapshotJPEG(opts, snapshotTimeout)
 }
 
 // VideoGetStreamingStatus gets the streaming status of the video.

@@ -67,7 +67,17 @@ int jetkvm_video_get_codec_type();
 #define VIDEO_SNAPSHOT_ERR_ENCODE -3
 #define VIDEO_SNAPSHOT_ERR_NOMEM -4
 #define VIDEO_SNAPSHOT_ERR_INVALID -5
-int jetkvm_video_snapshot_jpeg(int quality, int timeout_ms, uint8_t **data, size_t *len);
+// Which part of the frame a snapshot shows and how large it is. A zero
+// crop_width takes the whole frame. With only one of out_width and out_height
+// set, the other keeps the region's aspect ratio; with neither, the JPEG has
+// the size of the region. It is never larger than the region.
+typedef struct
+{
+    int quality;
+    int crop_x, crop_y, crop_width, crop_height;
+    int out_width, out_height;
+} jetkvm_snapshot_params_t;
+int jetkvm_video_snapshot_jpeg(const jetkvm_snapshot_params_t *params, int timeout_ms, uint8_t **data, size_t *len);
 int jetkvm_video_set_edid(const char *edid_hex);
 char *jetkvm_video_get_edid_hex();
 char *jetkvm_video_log_status();
