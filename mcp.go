@@ -415,7 +415,9 @@ const (
 	mcpPixelNoise   = 24
 	mcpChangedShare = 0.0002
 	mcpStableShare  = 0.002
-	mcpWaitPoll     = 150 * time.Millisecond
+	// mcpWaitPoll keeps a waiting agent from occupying the encoder and the
+	// single CPU core: each poll encodes and decodes a thumbnail.
+	mcpWaitPoll = 400 * time.Millisecond
 )
 
 func screenThumbnail() (image.Image, error) {
