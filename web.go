@@ -115,6 +115,11 @@ func setupRouter() *gin.Engine {
 		gin_logger.WithLogger(func(*gin.Context, zerolog.Logger) zerolog.Logger {
 			return *ginLogger
 		}),
+		// 503 means the host sends no video or the video is paused, which is a
+		// normal state rather than a fault of the device.
+		gin_logger.WithSpecificLogLevelByStatusCode(map[int]zerolog.Level{
+			http.StatusServiceUnavailable: zerolog.WarnLevel,
+		}),
 	))
 
 	staticFS, err := fs.Sub(staticFiles, "static")
