@@ -214,9 +214,19 @@ func setupRouter() *gin.Engine {
 
 		protected.POST("/device/send-wol/:mac-addr", handleSendWOLMagicPacket)
 
-		protected.GET("/video/snapshot", handleVideoSnapshot)
+		protected.GET("/auth/api-token", handleGetAPIToken)
+		protected.POST("/auth/api-token", handleCreateAPIToken)
+		protected.DELETE("/auth/api-token", handleDeleteAPIToken)
 
 		protected.GET("/diagnostics", handleDiagnosticsDownload)
+	}
+
+	// API routes for scripts and agents (login cookie or API token)
+	api := r.Group("/api")
+	api.Use(apiAuthMiddleware())
+	{
+		api.GET("/video/snapshot", handleVideoSnapshot)
+		api.POST("/rpc", handleAPIRPC)
 	}
 
 	// Catch-all route for SPA

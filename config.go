@@ -100,6 +100,8 @@ type Config struct {
 	IncludePreRelease    bool                 `json:"include_pre_release"`
 	HashedPassword       string               `json:"hashed_password"`
 	LocalAuthToken       string               `json:"local_auth_token"`
+	APITokenHash         string               `json:"api_token_hash,omitempty"`
+	APITokenCreatedAt    string               `json:"api_token_created_at,omitempty"`
 	LocalAuthMode        string               `json:"localAuthMode"` //TODO: fix it with migration
 	LocalLoopbackOnly    bool                 `json:"local_loopback_only"`
 	WakeOnLanDevices     []WakeOnLanDevice    `json:"wake_on_lan_devices"`
