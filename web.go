@@ -227,6 +227,8 @@ func setupRouter() *gin.Engine {
 	{
 		api.GET("/video/snapshot", handleVideoSnapshot)
 		api.POST("/rpc", handleAPIRPC)
+		// In stateless mode the MCP handler answers GET and DELETE itself.
+		api.Any("/mcp", handleMCP)
 	}
 
 	// Catch-all route for SPA
