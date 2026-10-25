@@ -104,7 +104,12 @@ func GetDefaultHostname() string {
 	return fmt.Sprintf("jetkvm-%s", strings.ToLower(deviceId))
 }
 
+// watchdogDone is closed once runWatchdog has returned, after disarming the
+// watchdog on shutdown.
+var watchdogDone = make(chan struct{})
+
 func runWatchdog() {
+	defer close(watchdogDone)
 	file, err := os.OpenFile("/dev/watchdog", os.O_WRONLY, 0)
 	if err != nil {
 		watchdogLogger.Warn().Err(err).Msg("unable to open /dev/watchdog, skipping watchdog reset")
