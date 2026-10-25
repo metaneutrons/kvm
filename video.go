@@ -60,7 +60,7 @@ func isHostDisplayAdvertised() bool {
 }
 
 func shouldAdvertiseHostDisplayLocked() bool {
-	return !config.HideDisplayWhenIdle || getActiveSessions() > 0
+	return !config.HideDisplayWhenIdle || getActiveSessions() > 0 || videoLeaseActive.Load()
 }
 
 func setHostDisplayAdvertised(enabled bool, reason string, force bool) error {
@@ -184,8 +184,8 @@ func doVideoSleepModeTicker(ctx context.Context, duration time.Duration) {
 	for {
 		select {
 		case <-timer.C:
-			if getActiveSessions() > 0 {
-				nativeLogger.Warn().Msg("not going to enter HDMI sleep mode because there are active sessions")
+			if getActiveSessions() > 0 || videoLeaseActive.Load() {
+				nativeLogger.Warn().Msg("not going to enter HDMI sleep mode because there are active sessions or a video lease")
 				continue
 			}
 

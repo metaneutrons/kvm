@@ -909,9 +909,13 @@ func handleVideoSnapshot(c *gin.Context) {
 		quality = v
 	}
 
-	jpeg, err := nativeInstance.VideoSnapshot(quality)
+	jpeg, err := takeVideoSnapshot(quality)
+	var noSignal errNoVideoSignal
 	switch {
-	case errors.Is(err, native.ErrVideoNotStreaming):
+	case errors.As(err, &noSignal):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error(), "reason": noSignal.reason})
+		return
+	case errors.Is(err, errVideoPaused), errors.Is(err, native.ErrVideoNotStreaming):
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 		return
 	case errors.Is(err, native.ErrSnapshotTimeout):

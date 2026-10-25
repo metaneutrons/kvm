@@ -460,7 +460,7 @@ func rpcSetVideoStreamPaused(session *Session, paused bool) error {
 	defer videoPauseMu.Unlock()
 	if paused {
 		videoPausedBy = session
-		return nativeInstance.VideoStop()
+		return stopVideoPipelineLocked()
 	}
 	if videoPausedBy != nil && videoPausedBy != session {
 		return nil
