@@ -35,10 +35,16 @@ const (
 	mcpMaxScroll   = 50
 	mcpMaxHold     = 5 * time.Second
 	absMouseMax    = 32767
+	// mcpScreenWidth is the widest screen the agent sees. Larger video is
+	// scaled down to it, which keeps screenshots small and below the sizes at
+	// which clients scale images themselves; the mouse tools use the same
+	// coordinates, so they match what the model sees.
+	mcpScreenWidth = 1280
 )
 
 const mcpInstructions = `This server controls the computer attached to a JetKVM. It sees the computer's HDMI output and acts as its USB keyboard and mouse.
-Take a screenshot first. Mouse tools use pixel coordinates of the screenshot, with 0,0 at the top left.
+Take a screenshot first. It shows the whole screen, scaled to at most 1280 pixels wide, and states the screen size. All mouse tools take x,y in the pixels of that full screenshot, with 0,0 at the top left, whatever the real video resolution is.
+To read small text or check details, take a screenshot with a region: it returns that part of the screen enlarged up to the real resolution. Coordinates for the mouse tools stay those of the full screenshot; the response explains how to convert a point in the zoomed image.
 type_text types characters through the host's keyboard layout, which must match the layout the host uses. press_keys sends key combinations by key name.
 If the screenshot reports no signal, the display may be asleep: press a key such as ShiftLeft or call wake_host, then take a new screenshot.`
 
@@ -67,8 +73,10 @@ func newMCPServer() *mcp.Server {
 	)
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "screenshot",
-		Description: "Capture the host's screen as a JPEG image, along with its size in pixels.",
+		Name: "screenshot",
+		Description: "Capture the host's screen as a JPEG image. Without a region it shows the whole screen, scaled to at most 1280 pixels wide; " +
+			"its pixels are the coordinates every mouse tool uses. With a region (in those same coordinates) it shows only that part, " +
+			"enlarged up to the real video resolution, to read small text. The response states the sizes and how to map a point in a zoomed image back to screen coordinates.",
 		Annotations: mcpReadOnly,
 	}, mcpScreenshot)
 	mcp.AddTool(server, &mcp.Tool{
@@ -136,8 +144,57 @@ func newMCPServer() *mcp.Server {
 
 type mcpEmpty struct{}
 
+type mcpRegion struct {
+	X      int `json:"x" jsonschema:"left edge in screen coordinates"`
+	Y      int `json:"y" jsonschema:"top edge in screen coordinates"`
+	Width  int `json:"width" jsonschema:"width in screen coordinates"`
+	Height int `json:"height" jsonschema:"height in screen coordinates"`
+}
+
 type mcpScreenshotInput struct {
-	Quality int `json:"quality,omitempty" jsonschema:"JPEG quality from 1 to 99, default 80"`
+	Quality int        `json:"quality,omitempty" jsonschema:"JPEG quality from 1 to 99, default 80"`
+	Region  *mcpRegion `json:"region,omitempty" jsonschema:"part of the screen to zoom into, in screen coordinates; omit for the whole screen"`
+}
+
+// mcpScreenSize returns the size of the screen the agent works with: the
+// video size, scaled down to mcpScreenWidth if it is wider.
+func mcpScreenSize(videoWidth, videoHeight int) (int, int) {
+	if videoWidth <= mcpScreenWidth {
+		return videoWidth, videoHeight
+	}
+	return mcpScreenWidth, (videoHeight*mcpScreenWidth + videoWidth/2) / videoWidth
+}
+
+// mcpSnapshotOptions turns a screenshot request in screen coordinates into
+// snapshot options in video pixels. A region is captured at the video's own
+// resolution, but never wider than mcpScreenWidth.
+func mcpSnapshotOptions(quality int, region *mcpRegion, videoWidth, videoHeight int) (native.SnapshotOptions, error) {
+	opts := native.SnapshotOptions{Quality: quality}
+	screenWidth, screenHeight := mcpScreenSize(videoWidth, videoHeight)
+	if region == nil {
+		if screenWidth != videoWidth {
+			opts.Width, opts.Height = screenWidth, screenHeight
+		}
+		return opts, nil
+	}
+
+	r := *region
+	if r.Width <= 0 || r.Height <= 0 || r.X < 0 || r.Y < 0 || r.X+r.Width > screenWidth || r.Y+r.Height > screenHeight {
+		return opts, fmt.Errorf("region %d,%d %dx%d is not within the %dx%d screen", r.X, r.Y, r.Width, r.Height, screenWidth, screenHeight)
+	}
+	if r.Width < 16 || r.Height < 16 {
+		return opts, errors.New("region must be at least 16x16")
+	}
+	toVideo := func(v, screen, video int) int { return v * video / screen }
+	opts.CropX = toVideo(r.X, screenWidth, videoWidth)
+	opts.CropY = toVideo(r.Y, screenHeight, videoHeight)
+	opts.CropWidth = toVideo(r.Width, screenWidth, videoWidth)
+	opts.CropHeight = toVideo(r.Height, screenHeight, videoHeight)
+	if opts.CropWidth > mcpScreenWidth {
+		opts.Width = mcpScreenWidth
+		opts.Height = (opts.CropHeight*mcpScreenWidth + opts.CropWidth/2) / opts.CropWidth
+	}
+	return opts, nil
 }
 
 func mcpScreenshot(_ context.Context, _ *mcp.CallToolRequest, in mcpScreenshotInput) (*mcp.CallToolResult, any, error) {
@@ -149,22 +206,51 @@ func mcpScreenshot(_ context.Context, _ *mcp.CallToolRequest, in mcpScreenshotIn
 		return nil, nil, errors.New("quality must be between 1 and 99")
 	}
 
-	image, err := takeVideoSnapshot(native.SnapshotOptions{Quality: quality})
-	var noSignal errNoVideoSignal
-	switch {
-	case errors.As(err, &noSignal):
-		return nil, nil, fmt.Errorf("no video signal from the host (%s); the display may be asleep, press a key or call wake_host", noSignal.reason)
-	case err != nil:
-		return nil, nil, err
+	// The video size is only known while there is a signal. Without one the
+	// first capture wakes the display, and the request is planned again.
+	var image []byte
+	for attempt := 0; ; attempt++ {
+		videoWidth, videoHeight := lastVideoState.Width, lastVideoState.Height
+		known := videoWidth > 0 && videoHeight > 0
+		opts := native.SnapshotOptions{Quality: quality}
+		if known {
+			var err error
+			if opts, err = mcpSnapshotOptions(quality, in.Region, videoWidth, videoHeight); err != nil {
+				return nil, nil, err
+			}
+		}
+		var err error
+		image, err = takeVideoSnapshot(opts)
+		var noSignal errNoVideoSignal
+		switch {
+		case errors.As(err, &noSignal):
+			return nil, nil, fmt.Errorf("no video signal from the host (%s); the display may be asleep, press a key or call wake_host", noSignal.reason)
+		case err != nil:
+			return nil, nil, err
+		}
+		if known || attempt > 0 || lastVideoState.Width <= 0 {
+			break
+		}
 	}
 
-	size := ""
-	if cfg, err := jpeg.DecodeConfig(bytes.NewReader(image)); err == nil {
-		size = fmt.Sprintf("Screen size %dx%d pixels.", cfg.Width, cfg.Height)
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(image))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read the snapshot: %w", err)
+	}
+	screenWidth, screenHeight := mcpScreenSize(lastVideoState.Width, lastVideoState.Height)
+	var text string
+	if in.Region == nil {
+		text = fmt.Sprintf("Full screen, %dx%d. Mouse tools take x,y in these pixels.", screenWidth, screenHeight)
+	} else {
+		r := in.Region
+		text = fmt.Sprintf("Zoomed region x=%d y=%d width=%d height=%d of the %dx%d screen, shown at %dx%d (%.1f times). "+
+			"Mouse tools still take full-screen coordinates: a point u,v in this image is at x = %d + u*%d/%d, y = %d + v*%d/%d.",
+			r.X, r.Y, r.Width, r.Height, screenWidth, screenHeight, cfg.Width, cfg.Height,
+			float64(cfg.Width)/float64(r.Width), r.X, r.Width, cfg.Width, r.Y, r.Height, cfg.Height)
 	}
 	return &mcp.CallToolResult{Content: []mcp.Content{
 		&mcp.ImageContent{Data: image, MIMEType: "image/jpeg"},
-		&mcp.TextContent{Text: size},
+		&mcp.TextContent{Text: text},
 	}}, nil, nil
 }
 
@@ -184,7 +270,8 @@ func toAbsMouse(x, y int) (int, int, error) {
 	if !gadget.HasAbsoluteMouse() {
 		return 0, 0, errors.New("the absolute mouse is disabled in the JetKVM's USB settings")
 	}
-	return absPosition(x, y, lastVideoState.Width, lastVideoState.Height)
+	screenWidth, screenHeight := mcpScreenSize(lastVideoState.Width, lastVideoState.Height)
+	return absPosition(x, y, screenWidth, screenHeight)
 }
 
 func absPosition(x, y, w, h int) (int, int, error) {
@@ -212,8 +299,8 @@ func mouseButton(name string) (uint8, error) {
 }
 
 type mcpPoint struct {
-	X int `json:"x" jsonschema:"horizontal position in screenshot pixels"`
-	Y int `json:"y" jsonschema:"vertical position in screenshot pixels"`
+	X int `json:"x" jsonschema:"horizontal position in pixels of the full screenshot"`
+	Y int `json:"y" jsonschema:"vertical position in pixels of the full screenshot"`
 }
 
 func mcpMoveMouse(_ context.Context, _ *mcp.CallToolRequest, in mcpPoint) (*mcp.CallToolResult, any, error) {
@@ -265,10 +352,10 @@ func mcpClick(_ context.Context, _ *mcp.CallToolRequest, in mcpClickInput) (*mcp
 }
 
 type mcpDragInput struct {
-	FromX  int    `json:"from_x" jsonschema:"start position, horizontal"`
-	FromY  int    `json:"from_y" jsonschema:"start position, vertical"`
-	ToX    int    `json:"to_x" jsonschema:"end position, horizontal"`
-	ToY    int    `json:"to_y" jsonschema:"end position, vertical"`
+	FromX  int    `json:"from_x" jsonschema:"start position, horizontal, in pixels of the full screenshot"`
+	FromY  int    `json:"from_y" jsonschema:"start position, vertical, in pixels of the full screenshot"`
+	ToX    int    `json:"to_x" jsonschema:"end position, horizontal, in pixels of the full screenshot"`
+	ToY    int    `json:"to_y" jsonschema:"end position, vertical, in pixels of the full screenshot"`
 	Button string `json:"button,omitempty" jsonschema:"left, right or middle, default left"`
 }
 

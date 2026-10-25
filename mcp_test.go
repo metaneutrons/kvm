@@ -154,3 +154,51 @@ func TestKeyStroke(t *testing.T) {
 		t.Error("seven keys were accepted")
 	}
 }
+
+func TestMCPScreenSize(t *testing.T) {
+	tests := []struct{ w, h, wantW, wantH int }{
+		{1920, 1080, 1280, 720},
+		{1280, 1024, 1280, 1024},
+		{1024, 768, 1024, 768},
+		{2560, 1440, 1280, 720},
+		{1920, 1200, 1280, 800},
+	}
+	for _, tt := range tests {
+		if w, h := mcpScreenSize(tt.w, tt.h); w != tt.wantW || h != tt.wantH {
+			t.Errorf("mcpScreenSize(%d,%d) = %d,%d, want %d,%d", tt.w, tt.h, w, h, tt.wantW, tt.wantH)
+		}
+	}
+}
+
+func TestMCPSnapshotOptions(t *testing.T) {
+	// The whole 1080p screen is scaled to 1280x720.
+	opts, err := mcpSnapshotOptions(80, nil, 1920, 1080)
+	if err != nil || opts.Width != 1280 || opts.Height != 720 || opts.CropWidth != 0 {
+		t.Errorf("full screen: %+v, %v", opts, err)
+	}
+	// A screen that fits is captured as it is.
+	opts, err = mcpSnapshotOptions(80, nil, 1024, 768)
+	if err != nil || opts.Width != 0 || opts.Height != 0 {
+		t.Errorf("small screen: %+v, %v", opts, err)
+	}
+	// A region in screen coordinates maps to video pixels at full resolution.
+	opts, err = mcpSnapshotOptions(80, &mcpRegion{X: 640, Y: 360, Width: 320, Height: 180}, 1920, 1080)
+	if err != nil || opts.CropX != 960 || opts.CropY != 540 || opts.CropWidth != 480 || opts.CropHeight != 270 || opts.Width != 0 {
+		t.Errorf("region: %+v, %v", opts, err)
+	}
+	// A wide region is not delivered wider than the screenshot.
+	opts, err = mcpSnapshotOptions(80, &mcpRegion{X: 0, Y: 0, Width: 1280, Height: 360}, 1920, 1080)
+	if err != nil || opts.CropWidth != 1920 || opts.Width != 1280 || opts.Height != 360 {
+		t.Errorf("wide region: %+v, %v", opts, err)
+	}
+	for _, bad := range []mcpRegion{
+		{X: 1200, Y: 0, Width: 100, Height: 100},
+		{X: -1, Y: 0, Width: 100, Height: 100},
+		{X: 0, Y: 0, Width: 8, Height: 100},
+		{X: 0, Y: 700, Width: 100, Height: 30},
+	} {
+		if _, err := mcpSnapshotOptions(80, &bad, 1920, 1080); err == nil {
+			t.Errorf("region %+v was accepted", bad)
+		}
+	}
+}
