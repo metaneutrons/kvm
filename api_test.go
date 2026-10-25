@@ -77,6 +77,7 @@ func newAPITestRouter() *gin.Engine {
 	api := r.Group("/api")
 	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
 	api.POST("/rpc", handleAPIRPC)
+	api.POST("/storage/upload", handleUploadHttp)
 	protected := r.Group("/")
 	protected.Use(protectedMiddleware())
 	protected.GET("/device", func(c *gin.Context) { c.Status(http.StatusOK) })
@@ -111,6 +112,9 @@ func TestAPIAuthMiddleware(t *testing.T) {
 		{"wrong api token", "/api/rpc", apiTokenPrefix + "wrong", "", http.StatusUnauthorized},
 		{"login cookie", "/api/rpc", "", "cookie-token", http.StatusOK},
 		{"api token on a UI route", "/device", token, "", http.StatusUnauthorized},
+		// The token reaches the upload handler, which knows no such upload.
+		{"api token for an upload", "/api/storage/upload?uploadId=none", token, "", http.StatusNotFound},
+		{"upload without credentials", "/api/storage/upload?uploadId=none", "", "", http.StatusUnauthorized},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
