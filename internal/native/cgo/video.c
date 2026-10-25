@@ -459,6 +459,21 @@ static int jpeg_chn_prepare(RK_U32 width, RK_U32 height, int quality)
     return 0;
 }
 
+static void jpeg_chn_destroy()
+{
+    if (!jpeg_chn_created)
+    {
+        return;
+    }
+    RK_MPI_VENC_StopRecvFrame(JPEG_VENC_CHANNEL);
+    int32_t ret = RK_MPI_VENC_DestroyChn(JPEG_VENC_CHANNEL);
+    if (ret != RK_SUCCESS)
+    {
+        log_error("RK_MPI_VENC_DestroyChn(JPEG) failed: %#x", ret);
+    }
+    jpeg_chn_created = false;
+}
+
 static int jpeg_encode_frame(VIDEO_FRAME_INFO_S *frame, int quality, uint8_t **data, size_t *len)
 {
     int ret = jpeg_chn_prepare(frame->stVFrame.u32Width, frame->stVFrame.u32Height, quality);
@@ -502,6 +517,9 @@ static int jpeg_encode_frame(VIDEO_FRAME_INFO_S *frame, int quality, uint8_t **d
     if (rk_ret != RK_SUCCESS)
     {
         log_error("RK_MPI_VENC_SendFrame(JPEG) failed: %#x", rk_ret);
+        // A frame may still be in flight. Recreate the channel so the next
+        // snapshot cannot receive this one.
+        jpeg_chn_destroy();
         return VIDEO_SNAPSHOT_ERR_ENCODE;
     }
 
@@ -513,6 +531,9 @@ static int jpeg_encode_frame(VIDEO_FRAME_INFO_S *frame, int quality, uint8_t **d
     if (rk_ret != RK_SUCCESS)
     {
         log_error("RK_MPI_VENC_GetStream(JPEG) failed: %#x", rk_ret);
+        // A frame may still be in flight. Recreate the channel so the next
+        // snapshot cannot receive this one.
+        jpeg_chn_destroy();
         return VIDEO_SNAPSHOT_ERR_ENCODE;
     }
 
@@ -589,16 +610,7 @@ static void snapshot_stop()
     }
     pthread_mutex_unlock(&snapshot_mutex);
 
-    if (jpeg_chn_created)
-    {
-        RK_MPI_VENC_StopRecvFrame(JPEG_VENC_CHANNEL);
-        int32_t ret = RK_MPI_VENC_DestroyChn(JPEG_VENC_CHANNEL);
-        if (ret != RK_SUCCESS)
-        {
-            log_error("RK_MPI_VENC_DestroyChn(JPEG) failed: %#x", ret);
-        }
-        jpeg_chn_created = false;
-    }
+    jpeg_chn_destroy();
     jpeg_rgb_release();
 }
 
