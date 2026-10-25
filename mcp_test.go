@@ -25,7 +25,7 @@ func connectMCPTestClient(t *testing.T) *mcp.ClientSession {
 	t.Helper()
 	token := setUpAPITest(t)
 	r := newAPITestRouter()
-	r.Group("/api", apiAuthMiddleware()).Any("/mcp", handleMCP)
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 
@@ -93,7 +93,7 @@ func TestMCPToolErrorsReachTheModel(t *testing.T) {
 func TestMCPRequiresAuth(t *testing.T) {
 	setUpAPITest(t)
 	r := newAPITestRouter()
-	r.Group("/api", apiAuthMiddleware()).Any("/mcp", handleMCP)
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
 	initialize := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
 
 	if w := doAPIRequest(r, http.MethodPost, "/api/mcp", initialize, "", ""); w.Code != http.StatusUnauthorized {

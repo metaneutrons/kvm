@@ -223,7 +223,7 @@ func setupRouter() *gin.Engine {
 
 	// API routes for scripts and agents (login cookie or API token)
 	api := r.Group("/api")
-	api.Use(apiAuthMiddleware())
+	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
 	{
 		api.GET("/video/snapshot", handleVideoSnapshot)
 		api.POST("/rpc", handleAPIRPC)

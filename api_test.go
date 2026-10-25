@@ -75,7 +75,7 @@ func newAPITestRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	api := r.Group("/api")
-	api.Use(apiAuthMiddleware())
+	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
 	api.POST("/rpc", handleAPIRPC)
 	protected := r.Group("/")
 	protected.Use(protectedMiddleware())
@@ -149,5 +149,29 @@ func TestAPIRPCDispatch(t *testing.T) {
 	}
 	if code, _ := call(`{not json`); code != http.StatusBadRequest {
 		t.Errorf("malformed body: status %d, want 400", code)
+	}
+}
+
+func TestAPIRejectsCrossSiteRequests(t *testing.T) {
+	setUpAPITest(t)
+	r := newAPITestRouter()
+	// A form or no-cors fetch from another site: text/plain needs no preflight.
+	body := `{"jsonrpc":"2.0","method":"setATXPowerAction","params":{"action":"power-long"},"id":1}`
+
+	send := func(site string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/rpc", strings.NewReader(body))
+		req.Header.Set("Content-Type", "text/plain")
+		req.Header.Set("Sec-Fetch-Site", site)
+		req.Header.Set("Origin", "https://evil.example")
+		req.AddCookie(&http.Cookie{Name: "authToken", Value: "cookie-token"})
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+	if code := send("cross-site"); code != http.StatusForbidden {
+		t.Errorf("cross-site request: status %d, want 403", code)
+	}
+	if code := send("same-site"); code != http.StatusForbidden {
+		t.Errorf("same-site request from another origin: status %d, want 403", code)
 	}
 }

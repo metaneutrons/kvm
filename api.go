@@ -87,6 +87,20 @@ func isValidAPIToken(token string) bool {
 // apiAuthMiddleware accepts an API token as bearer token and otherwise falls
 // back to the login cookie. Failed token attempts count against the login
 // rate limit.
+// /api accepts the login cookie as well, and gin parses a text/plain body as
+// JSON, so a page on another site could send requests that the browser does
+// not preflight. Reject cross-site browser requests; clients that are not
+// browsers send no Origin or Sec-Fetch-Site header and pass.
+var apiCrossOriginProtection = http.NewCrossOriginProtection()
+
+func apiCrossOriginMiddleware(c *gin.Context) {
+	if err := apiCrossOriginProtection.Check(c.Request); err != nil {
+		sendErrorJsonThenAbort(c, http.StatusForbidden, "Cross-origin request rejected")
+		return
+	}
+	c.Next()
+}
+
 func apiAuthMiddleware() gin.HandlerFunc {
 	cookieAuth := protectedMiddleware()
 	return func(c *gin.Context) {
