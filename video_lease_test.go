@@ -129,16 +129,43 @@ func TestVideoLeaseExpiryWaitsForExtension(t *testing.T) {
 	}
 }
 
-func TestVideoLeaseRefusesPausedVideo(t *testing.T) {
+func TestVideoLeaseRefusesPausedVideoDuringUpload(t *testing.T) {
 	rec := setUpLeaseTest(t, 1)
 	videoPauseMu.Lock()
 	videoPausedBy = &Session{}
 	videoPauseMu.Unlock()
+	pendingUploadsMutex.Lock()
+	pendingUploads["upload_test"] = pendingUpload{}
+	pendingUploadsMutex.Unlock()
+	t.Cleanup(func() {
+		pendingUploadsMutex.Lock()
+		delete(pendingUploads, "upload_test")
+		pendingUploadsMutex.Unlock()
+	})
 
 	if _, err := acquireVideoLease(); !errors.Is(err, errVideoPaused) {
 		t.Fatalf("err = %v, want errVideoPaused", err)
 	}
 	wantCalls(t, rec)
+}
+
+func TestVideoLeaseTakesOverPauseOfSession(t *testing.T) {
+	rec := setUpLeaseTest(t, 1)
+	session := &Session{}
+	videoPauseMu.Lock()
+	videoPausedBy = session
+	videoPauseMu.Unlock()
+
+	if _, err := acquireVideoLease(); err != nil {
+		t.Fatalf("err = %v, want the lease to take the pause over", err)
+	}
+	wantCalls(t, rec, "set-codec:0", "start")
+	videoPauseMu.Lock()
+	held := videoPausedBy
+	videoPauseMu.Unlock()
+	if held != nil {
+		t.Fatal("the pause is still held")
+	}
 }
 
 func TestVideoLeaseKeepsPipelineAfterLastSession(t *testing.T) {

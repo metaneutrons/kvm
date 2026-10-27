@@ -29,7 +29,7 @@ const (
 )
 
 var (
-	errVideoPaused = errors.New("video is paused by a session")
+	errVideoPaused = errors.New("video is paused while a virtual media upload runs; try again when it has finished")
 
 	// videoLeaseActive is readable without videoPauseMu for the display
 	// advertisement and the sleep timer, which hold other locks.
@@ -77,14 +77,21 @@ func markVideoPipelineStopped() {
 }
 
 // acquireVideoLease extends the lease and starts the pipeline if nothing runs
-// it. It reports whether the host display was advertised again, in which case
+// it. A pause that a web session holds, for example while its media dialog is
+// open, does not keep the lease out: the agent takes it over, as an open
+// browser tab must not block it. Only a running upload, which needs the
+// memory the pipeline would use, makes it wait. It reports whether the host display was advertised again, in which case
 // the host needs a few seconds before it sends a picture.
 func acquireVideoLease() (displayWoken bool, err error) {
 	videoPauseMu.Lock()
 	defer videoPauseMu.Unlock()
 
 	if videoPausedBy != nil {
-		return false, errVideoPaused
+		if uploadInProgress() {
+			return false, errVideoPaused
+		}
+		nativeLogger.Info().Msg("video lease takes over a pause held by a session")
+		videoPausedBy = nil
 	}
 
 	videoLeaseUntil = time.Now().Add(videoLeaseHold)
