@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -52,7 +54,12 @@ func setUpAPITestPerms(t *testing.T, perms ...string) string {
 		LocalAuthToken: "cookie-token",
 		APITokens:      []APIToken{{ID: "t1", Name: "test", Hash: hashAPIToken(token), Permissions: perms}},
 	}
-	t.Cleanup(func() { config = originalConfig })
+	// The tests send from one address, and failed attempts count against it.
+	passwordRateLimiter.RecordSuccess("192.0.2.1")
+	t.Cleanup(func() {
+		config = originalConfig
+		passwordRateLimiter.RecordSuccess("192.0.2.1")
+	})
 	return token
 }
 
@@ -391,5 +398,76 @@ func TestAPITokenNeedsHTTPSWhenEnabled(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("token over HTTPS: status %d, %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPIBasicAuthWithPassword(t *testing.T) {
+	setUpAPITest(t)
+	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.HashedPassword = string(hash)
+	r := newAPITestRouter()
+	ping := `{"jsonrpc":"2.0","method":"ping","id":1}`
+
+	send := func(user, password string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/rpc", strings.NewReader(ping))
+		req.Header.Set("Content-Type", "application/json")
+		req.SetBasicAuth(user, password)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	if code := send("api", "secret"); code != http.StatusOK {
+		t.Errorf("right password: status %d, want 200", code)
+	}
+	// The user name does not matter, and the remembered success still holds.
+	if code := send("", "secret"); code != http.StatusOK {
+		t.Errorf("right password, no user name: status %d, want 200", code)
+	}
+	if code := send("api", "wrong"); code != http.StatusUnauthorized {
+		t.Errorf("wrong password: status %d, want 401", code)
+	}
+
+	// A new password drops what was remembered about the old one.
+	newHash, _ := bcrypt.GenerateFromPassword([]byte("other"), bcrypt.MinCost)
+	config.HashedPassword = string(newHash)
+	if code := send("api", "secret"); code != http.StatusUnauthorized {
+		t.Errorf("old password after a change: status %d, want 401", code)
+	}
+	if code := send("api", "other"); code != http.StatusOK {
+		t.Errorf("new password: status %d, want 200", code)
+	}
+
+	// Credentials do not travel over plain HTTP while HTTPS is on.
+	config.TLSMode = "self-signed"
+	if code := send("api", "other"); code != http.StatusForbidden {
+		t.Errorf("password over plain HTTP with HTTPS enabled: status %d, want 403", code)
+	}
+}
+
+func TestAPIPasswordOpenWithoutPasswordMode(t *testing.T) {
+	setUpAPITest(t)
+	config.LocalAuthMode = "noPassword"
+	config.HashedPassword = ""
+	r := newAPITestRouter()
+	req := httptest.NewRequest(http.MethodPost, "/api/rpc", strings.NewReader(`{"jsonrpc":"2.0","method":"ping","id":1}`))
+	req.SetBasicAuth("api", "anything")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("no password mode: status %d, want 200", w.Code)
+	}
+
+	// With a password set but none stored, a password never matches.
+	config.LocalAuthMode = "password"
+	req = httptest.NewRequest(http.MethodPost, "/api/rpc", strings.NewReader(`{"jsonrpc":"2.0","method":"ping","id":1}`))
+	req.SetBasicAuth("api", "")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("empty password with none stored: status %d, want 401", w.Code)
 	}
 }

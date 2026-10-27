@@ -2,12 +2,16 @@ package kvm
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // A token carries a set of permissions. Viewing the screen and reading state
@@ -166,23 +170,28 @@ func apiCrossOriginMiddleware(c *gin.Context) {
 	c.Next()
 }
 
-// apiAuthMiddleware accepts an API token as bearer token and otherwise falls
-// back to the login cookie. Failed token attempts count against the login
-// rate limit.
+// apiAuthMiddleware accepts an API token as bearer token or the device
+// password as HTTP Basic Auth (any user name), and otherwise falls back to the
+// login cookie. The password has all permissions, like the login. Failed
+// attempts count against the login rate limit.
 func apiAuthMiddleware() gin.HandlerFunc {
 	cookieAuth := protectedMiddleware()
 	return func(c *gin.Context) {
-		token, isBearer := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer ")
-		if !isBearer {
+		authorization := c.GetHeader("Authorization")
+		token, isBearer := strings.CutPrefix(authorization, "Bearer ")
+		_, isBasic := strings.CutPrefix(authorization, "Basic ")
+		// Without a password the API is open, as the web UI is.
+		isBasic = isBasic && config.LocalAuthMode != "noPassword"
+		if !isBearer && !isBasic {
 			cookieAuth(c)
 			return
 		}
 
-		// With HTTPS enabled, plain HTTP stays open on port 80. Refuse the
-		// token there, so a client set up with an http:// URL fails at once
-		// instead of sending the token unencrypted on every request.
+		// With HTTPS enabled, plain HTTP stays open on port 80. Refuse
+		// credentials there, so a client set up with an http:// URL fails at
+		// once instead of sending them unencrypted on every request.
 		if config.TLSMode != "" && c.Request.TLS == nil {
-			sendErrorJsonThenAbort(c, http.StatusForbidden, "HTTPS is enabled on this device; use an https:// URL for the API token")
+			sendErrorJsonThenAbort(c, http.StatusForbidden, "HTTPS is enabled on this device; use an https:// URL for the API token or password")
 			return
 		}
 
@@ -192,21 +201,67 @@ func apiAuthMiddleware() gin.HandlerFunc {
 			sendErrorJsonThenAbort(c, http.StatusTooManyRequests, "Too many failed attempts. Please try again later.")
 			return
 		}
-		entry, ok := findAPIToken(strings.TrimSpace(token))
-		if !ok {
-			passwordRateLimiter.RecordFailure(ip)
-			sendErrorJsonThenAbort(c, http.StatusUnauthorized, "Unauthorized")
-			return
+
+		var grant apiGrant
+		if isBearer {
+			entry, ok := findAPIToken(strings.TrimSpace(token))
+			if !ok {
+				passwordRateLimiter.RecordFailure(ip)
+				sendErrorJsonThenAbort(c, http.StatusUnauthorized, "Unauthorized")
+				return
+			}
+			if entry.expired(time.Now()) {
+				sendErrorJsonThenAbort(c, http.StatusUnauthorized, "This API token has expired")
+				return
+			}
+			noteAPITokenUse(entry.ID, ip)
+			grant = apiGrant{perms: entry.perms(), tokenID: entry.ID, name: entry.Name}
+		} else {
+			_, password, _ := c.Request.BasicAuth()
+			if !checkAPIPassword(password) {
+				passwordRateLimiter.RecordFailure(ip)
+				sendErrorJsonThenAbort(c, http.StatusUnauthorized, "Unauthorized")
+				return
+			}
+			grant = apiGrant{perms: permAll, name: "password"}
 		}
-		if entry.expired(time.Now()) {
-			sendErrorJsonThenAbort(c, http.StatusUnauthorized, "This API token has expired")
-			return
-		}
-		noteAPITokenUse(entry.ID, ip)
-		grant := apiGrant{perms: entry.perms(), tokenID: entry.ID, name: entry.Name}
 		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), apiGrantKey{}, grant))
 		c.Next()
 	}
+}
+
+// A script may send the password with every request, and bcrypt is slow on
+// this CPU, so the last password that passed is remembered as a digest. The
+// digest includes the stored hash, so changing the password drops it. Only a
+// success is remembered; wrong passwords always go through bcrypt.
+var apiPasswordCache struct {
+	mu    sync.Mutex
+	key   [sha256.Size]byte
+	valid bool
+}
+
+func apiPasswordKey(password string) [sha256.Size]byte {
+	return sha256.Sum256([]byte(config.HashedPassword + "\x00" + password))
+}
+
+func checkAPIPassword(password string) bool {
+	if config.HashedPassword == "" {
+		return false
+	}
+	key := apiPasswordKey(password)
+	apiPasswordCache.mu.Lock()
+	hit := apiPasswordCache.valid && subtle.ConstantTimeCompare(apiPasswordCache.key[:], key[:]) == 1
+	apiPasswordCache.mu.Unlock()
+	if hit {
+		return true
+	}
+	if bcrypt.CompareHashAndPassword([]byte(config.HashedPassword), []byte(password)) != nil {
+		return false
+	}
+	apiPasswordCache.mu.Lock()
+	apiPasswordCache.key, apiPasswordCache.valid = key, true
+	apiPasswordCache.mu.Unlock()
+	return true
 }
 
 // handleAPIRPC answers a single JSON-RPC 2.0 request with the same handlers

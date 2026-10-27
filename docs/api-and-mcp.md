@@ -59,6 +59,16 @@ runs without a password, where it is the only way to close MCP.
 Tokens from an earlier version are kept: the single token becomes an entry
 named "API token", with all permissions or view only, as it was.
 
+### Using the password
+
+The device password also works, as HTTP Basic Auth with any user name, for
+example `curl -u api:<password> …`. It has all permissions, like the login, and
+costs the device more work than a token, so use a token for anything that runs
+unattended; the password is meant for a quick call by hand. Wrong passwords
+count towards the same rate limit as tokens and logins, and while HTTPS is on,
+the password is refused over plain HTTP just like a token. The API sends no
+`WWW-Authenticate` header, so a browser does not ask for a password.
+
 Requests from a browser that is logged in to the web UI also pass, as long as
 they come from the JetKVM's own pages. Requests that other websites make the
 browser send are rejected.
