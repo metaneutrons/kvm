@@ -59,7 +59,7 @@ func TestMCPListsTools(t *testing.T) {
 	for _, tool := range res.Tools {
 		names = append(names, tool.Name)
 	}
-	for _, want := range []string{"screenshot", "move_mouse", "click", "drag", "scroll", "press_keys", "type_text", "get_state", "wait", "wake_host", "jiggler", "power", "mount_media", "unmount_media"} {
+	for _, want := range []string{"screenshot", "move_mouse", "click", "drag", "scroll", "press_keys", "type_text", "get_state", "wait", "list_keyboard_layouts", "list_media", "wake_host", "set_jiggler", "set_keyboard_layout", "control_power", "mount_media", "unmount_media"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("tool %s is missing from %v", want, names)
 		}
@@ -75,8 +75,10 @@ func TestMCPToolErrorsReachTheModel(t *testing.T) {
 	}{
 		{"type_text", map[string]any{"text": "hi", "layout": "xx-XX"}, "unknown layout"},
 		{"type_text", map[string]any{"text": "a\tb", "layout": "en-US"}, "cannot type"},
+		{"set_keyboard_layout", map[string]any{"layout": "xx-XX"}, "unknown layout"},
 		{"press_keys", map[string]any{"keys": []string{"Ctrl", "NoSuchKey"}}, "unknown key"},
-		{"click", map[string]any{"x": 1, "y": 1, "button": "fourth"}, "unknown mouse button"},
+		{"click", map[string]any{"x": 1, "y": 1, "button": "fourth"}, "button"},
+		{"mount_media", map[string]any{"url": "http://x", "mode": "floppy"}, "mode"},
 		{"mount_media", map[string]any{}, "give url or file"},
 		{"screenshot", map[string]any{"quality": 100}, "quality"},
 	}
@@ -427,15 +429,16 @@ func connectMCPWithToken(t *testing.T, token string) *mcp.ClientSession {
 }
 
 func TestMCPToolsFollowPermissions(t *testing.T) {
-	inputTools := []string{"click", "drag", "jiggler", "move_mouse", "press_keys", "scroll", "type_text"}
+	viewTools := []string{"get_state", "list_keyboard_layouts", "list_media", "screenshot", "wait"}
+	inputTools := []string{"click", "drag", "set_jiggler", "set_keyboard_layout", "move_mouse", "press_keys", "scroll", "type_text"}
 	tests := []struct {
 		perms []string
 		want  []string
 	}{
-		{[]string{"view"}, []string{"get_state", "screenshot", "wait"}},
-		{[]string{"input"}, append([]string{"get_state", "screenshot", "wait"}, inputTools...)},
-		{[]string{"media"}, []string{"get_state", "mount_media", "screenshot", "unmount_media", "wait"}},
-		{[]string{"power"}, []string{"get_state", "power", "screenshot", "wait", "wake_host"}},
+		{[]string{"view"}, viewTools},
+		{[]string{"input"}, append(slices.Clone(viewTools), inputTools...)},
+		{[]string{"media"}, append(slices.Clone(viewTools), "mount_media", "unmount_media")},
+		{[]string{"power"}, append(slices.Clone(viewTools), "control_power", "wake_host")},
 	}
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.perms, "+"), func(t *testing.T) {
@@ -474,5 +477,124 @@ func TestMCPCanBeTurnedOff(t *testing.T) {
 	// The API itself keeps working.
 	if w := doAPIRequest(r, http.MethodPost, "/api/rpc", `{"jsonrpc":"2.0","method":"ping","id":1}`, token, ""); w.Code != http.StatusOK {
 		t.Errorf("API with MCP turned off: status %d, want 200", w.Code)
+	}
+}
+
+func TestMCPSetToolsNeedTheirArgument(t *testing.T) {
+	token := setUpAPITest(t)
+	res, err := connectMCPWithToken(t, token).ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := map[string]string{"set_jiggler": "enabled", "set_keyboard_layout": "layout"}
+	seen := 0
+	for _, tool := range res.Tools {
+		arg, ok := required[tool.Name]
+		if !ok {
+			continue
+		}
+		seen++
+		schema, _ := json.Marshal(tool.InputSchema)
+		var parsed struct {
+			Required []string `json:"required"`
+		}
+		_ = json.Unmarshal(schema, &parsed)
+		if !slices.Contains(parsed.Required, arg) {
+			t.Errorf("%s does not require %q: %s", tool.Name, arg, schema)
+		}
+	}
+	if seen != len(required) {
+		t.Errorf("found %d of %d tools", seen, len(required))
+	}
+}
+
+// The tools follow one scheme: verb_noun names (the screen primitives keep
+// their usual single words), a title and description for each, hints that
+// match what the tool does, and listed values where an argument takes one of
+// a few.
+func TestMCPToolScheme(t *testing.T) {
+	token := setUpAPITest(t)
+	session := connectMCPWithToken(t, token)
+	res, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	screenWords := []string{"screenshot", "wait", "click", "drag", "scroll"}
+	for _, tool := range res.Tools {
+		if tool.Title == "" || tool.Description == "" || tool.Annotations == nil {
+			t.Errorf("%s lacks a title, description or annotations", tool.Name)
+			continue
+		}
+		verb, _, ok := strings.Cut(tool.Name, "_")
+		if !ok && !slices.Contains(screenWords, tool.Name) {
+			t.Errorf("%s is neither verb_noun nor a screen word", tool.Name)
+		}
+		switch verb {
+		case "get", "list":
+			if !tool.Annotations.ReadOnlyHint {
+				t.Errorf("%s reads and should say so", tool.Name)
+			}
+		case "set":
+			if tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint ||
+				(tool.Annotations.DestructiveHint != nil && *tool.Annotations.DestructiveHint) {
+				t.Errorf("%s is a setting: idempotent, not destructive, not read-only: %+v", tool.Name, tool.Annotations)
+			}
+		}
+		if tool.Annotations.ReadOnlyHint && tool.Annotations.DestructiveHint != nil && *tool.Annotations.DestructiveHint {
+			t.Errorf("%s is read-only and destructive", tool.Name)
+		}
+	}
+
+	enums := map[string]string{"click": "button", "drag": "button", "wait": "until", "mount_media": "mode", "control_power": "action"}
+	for _, tool := range res.Tools {
+		arg, ok := enums[tool.Name]
+		if !ok {
+			continue
+		}
+		schema, _ := json.Marshal(tool.InputSchema)
+		var parsed struct {
+			Properties map[string]struct {
+				Enum []string `json:"enum"`
+			} `json:"properties"`
+		}
+		_ = json.Unmarshal(schema, &parsed)
+		if len(parsed.Properties[arg].Enum) == 0 {
+			t.Errorf("%s does not list the values of %q: %s", tool.Name, arg, schema)
+		}
+	}
+}
+
+func TestMCPListTools(t *testing.T) {
+	token := setUpAPITest(t)
+	config.KeyboardLayout = "de-DE"
+	session := connectMCPWithToken(t, token)
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_keyboard_layouts"})
+	if err != nil || res.IsError {
+		t.Fatalf("list_keyboard_layouts: %v %+v", err, res)
+	}
+	var layouts mcpLayoutList
+	raw, _ := json.Marshal(res.StructuredContent)
+	if err := json.Unmarshal(raw, &layouts); err != nil {
+		t.Fatal(err)
+	}
+	if layouts.Current != "de-DE" {
+		t.Errorf("current layout %q", layouts.Current)
+	}
+	var codes []string
+	for _, l := range layouts.Layouts {
+		if l.Name == "" {
+			t.Errorf("layout %s has no name", l.Code)
+		}
+		codes = append(codes, l.Code)
+	}
+	for _, want := range []string{"de-DE", "de-DE-macos", "en-US"} {
+		if !slices.Contains(codes, want) {
+			t.Errorf("layout %s is not listed", want)
+		}
+	}
+
+	if res, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "list_media"}); err != nil || res.IsError {
+		t.Errorf("list_media: %v %+v", err, res)
 	}
 }

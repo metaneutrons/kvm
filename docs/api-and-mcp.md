@@ -39,10 +39,10 @@ what it needs:
 
 | Permission | Allows | MCP tools |
 |---|---|---|
-| View | Screenshots and device status. Always included. | `screenshot`, `get_state`, `wait` |
-| Input | Keyboard, mouse and the mouse jiggler. | `move_mouse`, `click`, `drag`, `scroll`, `press_keys`, `type_text`, `jiggler` |
+| View | Screenshots, device status and lists of layouts and images. Always included. | `screenshot`, `get_state`, `wait`, `list_keyboard_layouts`, `list_media` |
+| Input | Keyboard, mouse and the mouse jiggler. | `move_mouse`, `click`, `drag`, `scroll`, `press_keys`, `type_text`, `set_jiggler`, `set_keyboard_layout` |
 | Virtual media | Mounting and unmounting images, uploading files. | `mount_media`, `unmount_media` |
-| Power | ATX and DC power, Wake-on-LAN and the USB wake-up. | `power`, `wake_host` |
+| Power | ATX and DC power, Wake-on-LAN and the USB wake-up. | `control_power`, `wake_host` |
 
 A call without the permission is refused, and an MCP connection only lists the
 tools its token covers. Input is close to full control of the host: anyone who
@@ -120,18 +120,50 @@ zoomed image maps back to screen coordinates.
 
 ### Tools
 
+The tools come in five groups, one per permission (see above). Names have the
+form `verb_noun`; the screen primitives `screenshot`, `wait`, `click`, `drag`
+and `scroll` keep their usual single words. `get_` and `list_` tools only read,
+`set_` tools change a setting of the JetKVM, and everything an argument can
+choose from can be looked up: layouts with `list_keyboard_layouts`, image files
+with `list_media`, the active power extension with `get_state`.
+
+**Observe** (View)
+
 | Tool | What it does |
 |---|---|
-| `screenshot` | The screen as JPEG, or a zoomed region of it. Starts video capture if no browser session runs it, and keeps it running for 30 seconds. |
-| `move_mouse`, `click`, `drag`, `scroll` | Mouse input at screen coordinates. |
-| `press_keys` | Presses keys together, e.g. `["ControlLeft", "KeyC"]`, and holds them for up to 30 seconds. Keys are named after the physical US position, as in `KeyboardEvent.code`; `Ctrl`, `Shift`, `Alt`, `Cmd`, `Win` and `Esc` work as short forms. |
-| `type_text` | Types up to 4096 characters through a keyboard layout. |
-| `get_state` | Video signal, USB, keyboard layout and LEDs, virtual media, power. |
+| `screenshot` | The screen as JPEG, or a zoomed region of it. Starts video capture if no browser session runs it, and keeps it running for 30 seconds. A pause that a web session holds, for example by an open media dialog, is taken over; only a running upload makes it wait. |
+| `get_state` | Video signal, USB, keyboard layout and LEDs, jiggler, virtual media, power. |
 | `wait` | Waits a number of seconds, or until the screen changes or settles. |
+| `list_keyboard_layouts` | The layouts `type_text` can use, with the one set in the JetKVM. |
+| `list_media` | The image files in the JetKVM's storage and the free space. |
+
+**Act** (Input)
+
+| Tool | What it does |
+|---|---|
+| `move_mouse`, `click`, `drag`, `scroll` | Mouse input at screen coordinates. |
+| `press_keys` | Presses keys together, e.g. `["ControlLeft", "KeyC"]`, and holds them for up to 30 seconds (`hold_seconds`). Keys are named after the physical US position, as in `KeyboardEvent.code`; `Ctrl`, `Shift`, `Alt`, `Cmd`, `Win` and `Esc` work as short forms. |
+| `type_text` | Types up to 4096 characters through a keyboard layout. |
+| `set_jiggler` | Turns the mouse jiggler on or off, which keeps the host awake while the agent is idle. The setting is saved and also applies to the web UI. |
+| `set_keyboard_layout` | Sets the JetKVM's default keyboard layout. `type_text` also takes a layout per call. The setting is saved and also applies to the web UI. |
+
+**Power** (Power)
+
+| Tool | What it does |
+|---|---|
 | `wake_host` | Sends a USB remote wakeup to a sleeping host. |
-| `jiggler` | Turns the mouse jiggler on or off, which keeps the host awake while the agent is idle. The setting is saved and also applies to the web UI. |
-| `power` | Power button, reset or power supply, with the ATX or DC extension. |
-| `mount_media`, `unmount_media` | Attaches an image from a URL or the JetKVM's storage as a USB CD-ROM or disk. |
+| `control_power` | Power button, reset or power supply, with the ATX or DC extension. |
+
+**Media** (Virtual media)
+
+| Tool | What it does |
+|---|---|
+| `mount_media`, `unmount_media` | Attaches an image from a URL or the JetKVM's storage as a USB CD-ROM or disk (`CDROM` or `Disk`), or detaches it. |
+
+Arguments with a fixed set of values (`button`, `until`, `mode`, `action`) list
+them in the tool's schema. All durations are in seconds. Each tool has a title
+and hints for the client: the reading tools are marked read-only, the settings
+idempotent and not destructive, the rest as acting on the host.
 
 Every action answers with a short confirmation, and errors are returned to the
 model as text so it can correct itself.
@@ -171,7 +203,7 @@ Points to know:
   a screenshot once the screen has settled, which saves a separate call. The
   `wait` tool waits a number of seconds, or until the screen changes or stops
   changing, for example while an app starts.
-- **Holding keys.** `press_keys` holds keys for up to 30 seconds (`hold_ms`),
+- **Holding keys.** `press_keys` holds keys for up to 30 seconds (`hold_seconds`),
   for example Option through a Mac's startup to reach the boot picker.
 
 ## HTTP endpoints

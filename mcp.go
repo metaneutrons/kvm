@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/jetkvm/kvm/internal/hidrpc"
@@ -91,7 +92,7 @@ func (s mcpScreen) instructions(perms apiPerm) string {
 	return `This server controls the computer attached to a JetKVM. It sees the computer's HDMI output and acts as its USB keyboard and mouse.
 Take a screenshot first. It shows the whole screen, ` + size + `, and states the screen size. All mouse tools take x,y in the pixels of that full screenshot, with 0,0 at the top left. Fractions such as 412.5 are allowed for precise positions.
 To read small text or check details, take a screenshot with a region: it returns that part of the screen enlarged up to the real resolution. Coordinates for the mouse tools stay those of the full screenshot; the response explains how to convert a point in the zoomed image.
-type_text types characters through a keyboard layout, which must match the layout the host uses; for a Mac pick the macOS variant, such as de-DE-macos (get_state lists them). press_keys sends key combinations by key name.
+type_text types characters through a keyboard layout, which must match the layout the host uses; for a Mac pick the macOS variant, such as de-DE-macos (list_keyboard_layouts shows them; set_keyboard_layout changes the JetKVM's default). press_keys sends key combinations by key name.
 Input tools take screenshot: true to return a screenshot once the screen has settled after the action, which saves a separate call. The wait tool waits for the screen to change or settle, for example while an app starts.
 If the screenshot reports no signal, the display may be asleep: press a key such as ShiftLeft or call wake_host, then take a new screenshot.` + permissionNote(perms)
 }
@@ -158,6 +159,9 @@ var (
 	mcpReadOnly = &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: boolPtr(false)}
 	// Input reaches a computer whose state the server cannot see.
 	mcpInput = &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(false)}
+	// A setting of the JetKVM: it changes nothing on the host by itself, and
+	// setting it again leaves it as it is.
+	mcpSetting = &mcp.ToolAnnotations{DestructiveHint: boolPtr(false), IdempotentHint: true, OpenWorldHint: boolPtr(false)}
 )
 
 // mcpAfter is embedded in input tools' arguments to ask for a screenshot of
@@ -196,10 +200,9 @@ func mcpActionDetail(in any) string {
 	case mcpTypeTextInput:
 		return fmt.Sprintf("%d characters, layout %q", len([]rune(v.Text)), v.Layout)
 	case mcpJigglerInput:
-		if v.Enabled == nil {
-			return "report state"
-		}
-		return fmt.Sprintf("enabled=%t", *v.Enabled)
+		return fmt.Sprintf("enabled=%t", v.Enabled)
+	case mcpKeyboardLayoutInput:
+		return fmt.Sprintf("layout=%q", v.Layout)
 	case mcpEmpty:
 		return ""
 	}
@@ -217,7 +220,8 @@ func newMCPServer(screen mcpScreen, perms apiPerm) *mcp.Server {
 		fullScreen = "at the video's own resolution"
 	}
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "screenshot",
+		Name:  "screenshot",
+		Title: "Take a screenshot",
 		Description: "Capture the host's screen as a JPEG image. Without a region it shows the whole screen, " + fullScreen + "; " +
 			"its pixels are the coordinates every mouse tool uses. With a region (in those same coordinates) it shows only that part, " +
 			"enlarged up to the real video resolution, to read small text. The response states the sizes and how to map a point in a zoomed image back to screen coordinates.",
@@ -225,82 +229,120 @@ func newMCPServer(screen mcpScreen, perms apiPerm) *mcp.Server {
 	}, screen.screenshot)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_state",
-		Description: "Report the video signal, USB connection, keyboard layout and LEDs, virtual media and power state.",
+		Title:       "Get the device state",
+		Description: "Report the video signal, USB connection, keyboard layout (with all available ones) and LEDs, virtual media, power state and whether the jiggler is on.",
 		Annotations: mcpReadOnly,
 	}, mcpGetState)
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "wait",
+		Name:        "wait",
+		Title:       "Wait for the screen",
+		InputSchema: schemaWithEnums[mcpWaitInput](map[string][]string{"until": {waitUntilChange, waitUntilStable}}),
 		Description: "Wait before the next step: a number of seconds, or until the screen changes (until: change) " +
 			"or stops changing (until: stable), at most 60 seconds. Use it while an app starts, a page loads or the host boots. " +
 			"Live content such as a ticking clock or a CPU graph counts as a change, but does not keep the screen from being stable.",
 		Annotations: mcpReadOnly,
 	}, mcpWait)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_keyboard_layouts",
+		Title:       "List keyboard layouts",
+		Description: "List the keyboard layouts type_text can use, with the one set in the JetKVM. Use a code from it as the layout of type_text or in set_keyboard_layout.",
+		Annotations: mcpReadOnly,
+	}, mcpListKeyboardLayouts)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_media",
+		Title:       "List media images",
+		Description: "List the image files in the JetKVM's storage that mount_media can attach, with their sizes and the free space.",
+		Annotations: mcpReadOnly,
+	}, mcpListMedia)
 	if perms&permInput != 0 {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "move_mouse",
+			Title:       "Move the mouse",
 			Description: "Move the mouse pointer to a screen position.",
 			Annotations: mcpInput,
 		}, trackMCP(screen, "move_mouse", screen.moveMouse))
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "click",
+			Title:       "Click",
+			InputSchema: schemaWithEnums[mcpClickInput](map[string][]string{"button": mcpButtons}),
 			Description: "Move the mouse pointer to a screen position and click a button there.",
 			Annotations: mcpInput,
 		}, trackMCP(screen, "click", screen.click))
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "drag",
+			Title:       "Drag",
+			InputSchema: schemaWithEnums[mcpDragInput](map[string][]string{"button": mcpButtons}),
 			Description: "Press a mouse button at one screen position, move to another and release it there.",
 			Annotations: mcpInput,
 		}, trackMCP(screen, "drag", screen.drag))
 		mcp.AddTool(server, &mcp.Tool{
-			Name: "scroll",
+			Name:  "scroll",
+			Title: "Scroll",
 			Description: "Move the mouse pointer to a screen position and turn the scroll wheel there. " +
 				"Positive delta_y turns the wheel down, which scrolls down on Windows and Linux. macOS reverses it with natural scrolling, its default, " +
 				"so check the direction with a screenshot.",
 			Annotations: mcpInput,
 		}, trackMCP(screen, "scroll", screen.scroll))
 		mcp.AddTool(server, &mcp.Tool{
-			Name: "press_keys",
+			Name:  "press_keys",
+			Title: "Press keys",
 			Description: "Press keys together and release them, for shortcuts and special keys. " +
 				`Keys are named after the physical US key position, as in the browser's KeyboardEvent.code: "KeyA", "Digit1", "Enter", "Tab", "Escape", "Backspace", "ArrowUp", "F5", "ControlLeft", "ShiftLeft", "AltLeft", "AltRight", "MetaLeft". ` +
 				`Ctrl, Shift, Alt, Cmd, Win and Esc are accepted as short forms. Example: ["ControlLeft", "KeyC"].`,
 			Annotations: mcpInput,
 		}, trackMCP(screen, "press_keys", mcpPressKeys))
 		mcp.AddTool(server, &mcp.Tool{
-			Name: "type_text",
+			Name:  "type_text",
+			Title: "Type text",
 			Description: "Type text on the host's keyboard. Characters are mapped through a keyboard layout, " +
 				"which must match the layout the host uses: for a Mac use the macOS variant such as de-DE-macos or en-US-macos, for Windows and Linux the plain one such as de-DE. " +
-				"The default is the layout set in the JetKVM. Newlines press Enter. Fails without typing anything if a character is not in the layout.",
+				"The default is the layout set in the JetKVM (list_keyboard_layouts shows the codes). Newlines press Enter. Fails without typing anything if a character is not in the layout.",
 			Annotations: mcpInput,
 		}, trackMCP(screen, "type_text", mcpTypeText))
 		mcp.AddTool(server, &mcp.Tool{
-			Name: "jiggler",
+			Name:  "set_jiggler",
+			Title: "Set the mouse jiggler",
 			Description: "Turn the JetKVM's mouse jiggler on or off. While it is on, it moves the mouse by a few pixels when no input arrived for a while, " +
 				"which keeps the host from sleeping or locking its screen. The setting is saved on the JetKVM and stays until changed, also for people using the web UI. " +
-				"Without enabled, it only reports the current state.",
-			Annotations: mcpInput,
-		}, trackMCP(screen, "jiggler", mcpJiggler))
+				"get_state reports whether it is on.",
+			Annotations: mcpSetting,
+		}, trackMCP(screen, "set_jiggler", mcpSetJiggler))
+		mcp.AddTool(server, &mcp.Tool{
+			Name:  "set_keyboard_layout",
+			Title: "Set the keyboard layout",
+			Description: "Set the JetKVM's default keyboard layout, which type_text uses when it is given no layout. It must match the layout the host uses: " +
+				"for a Mac the macOS variant such as de-DE-macos, for Windows and Linux the plain one such as de-DE. " +
+				"The setting is saved on the JetKVM and stays until changed, also for people using the web UI. list_keyboard_layouts shows the available layouts.",
+			Annotations: mcpSetting,
+		}, trackMCP(screen, "set_keyboard_layout", mcpSetKeyboardLayout))
 	}
 	if perms&permPower != 0 {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "wake_host",
+			Title:       "Wake the host",
 			Description: "Send a USB remote wakeup signal to wake the host from sleep.",
 			Annotations: mcpInput,
 		}, trackMCP(screen, "wake_host", mcpWakeHost))
 		mcp.AddTool(server, &mcp.Tool{
-			Name: "power",
-			Description: "Use the power extension. With the ATX extension: power-short presses the power button, power-long holds it for five seconds to force off, reset presses reset. " +
+			Name:        "control_power",
+			Title:       "Control power",
+			InputSchema: schemaWithEnums[mcpPowerInput](map[string][]string{"action": {"power-short", "power-long", "reset", "on", "off"}}),
+			Description: "Use the power extension (get_state says which one is active). With the ATX extension: power-short presses the power button, power-long holds it for five seconds to force off, reset presses reset. " +
 				"With the DC extension: on and off switch the host's power supply.",
 			Annotations: mcpInput,
-		}, trackMCP(screen, "power", mcpPower))
+		}, trackMCP(screen, "control_power", mcpControlPower))
 	}
 	if perms&permMedia != 0 {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "mount_media",
-			Description: "Attach an image to the host as a USB drive, either from a URL or from a file in the JetKVM's storage.",
+			Title:       "Mount an image",
+			InputSchema: schemaWithEnums[mcpMountInput](map[string][]string{"mode": {"CDROM", "Disk"}}),
+			Description: "Attach an image to the host as a USB drive, either from a URL or from a file in the JetKVM's storage (list_media shows the files). It replaces an image that is already attached.",
 			Annotations: mcpInput,
 		}, trackMCP(screen, "mount_media", mcpMountMedia))
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "unmount_media",
+			Title:       "Unmount the image",
 			Description: "Detach the virtual USB drive from the host.",
 			Annotations: mcpInput,
 		}, trackMCP(screen, "unmount_media", mcpUnmountMedia))
@@ -777,6 +819,9 @@ func absPosition(x, y float64, w, h int) (int, int, error) {
 	return ax, ay, nil
 }
 
+// mcpButtons are the mouse buttons the tools accept.
+var mcpButtons = []string{"left", "right", "middle"}
+
 func mouseButton(name string) (uint8, error) {
 	switch strings.ToLower(name) {
 	case "", "left":
@@ -1024,8 +1069,8 @@ func runKeyStrokes(strokes []keyboard.Stroke, hold time.Duration) error {
 }
 
 type mcpPressKeysInput struct {
-	Keys   []string `json:"keys" jsonschema:"key names pressed together, modifiers included"`
-	HoldMS int      `json:"hold_ms,omitempty" jsonschema:"how long to hold the keys in milliseconds, default 20, at most 30000 (e.g. Option through a Mac's boot)"`
+	Keys        []string `json:"keys" jsonschema:"key names pressed together, modifiers included"`
+	HoldSeconds float64  `json:"hold_seconds,omitempty" jsonschema:"how long to hold the keys, in seconds, default 0.02, at most 30 (e.g. Option through a Mac's boot)"`
 	mcpAfter
 }
 
@@ -1034,8 +1079,8 @@ func mcpPressKeys(_ context.Context, _ *mcp.CallToolRequest, in mcpPressKeysInpu
 		return nil, nil, errors.New("no keys given")
 	}
 	hold := mcpKeyDelay
-	if in.HoldMS > 0 {
-		hold = time.Duration(in.HoldMS) * time.Millisecond
+	if in.HoldSeconds > 0 {
+		hold = time.Duration(in.HoldSeconds * float64(time.Second))
 	}
 	if hold > mcpMaxHold {
 		return nil, nil, fmt.Errorf("keys can be held for at most %s", mcpMaxHold)
@@ -1047,7 +1092,7 @@ func mcpPressKeys(_ context.Context, _ *mcp.CallToolRequest, in mcpPressKeysInpu
 	if err := runKeyStrokes([]keyboard.Stroke{stroke}, hold); err != nil {
 		return nil, nil, err
 	}
-	return mcpDone("Pressed %s for %d ms.", strings.Join(in.Keys, "+"), hold.Milliseconds())
+	return mcpDone("Pressed %s for %s.", strings.Join(in.Keys, "+"), hold)
 }
 
 type mcpTypeTextInput struct {
@@ -1082,25 +1127,35 @@ func mcpTypeText(_ context.Context, _ *mcp.CallToolRequest, in mcpTypeTextInput)
 }
 
 type mcpState struct {
-	Video            native.VideoState        `json:"video"`
-	USB              string                   `json:"usb"`
-	KeyboardLayout   string                   `json:"keyboard_layout"`
-	KeyboardLEDs     *usbgadget.KeyboardState `json:"keyboard_leds,omitempty"`
-	VirtualMedia     *VirtualMediaState       `json:"virtual_media,omitempty"`
-	PowerExtension   string                   `json:"power_extension,omitempty"`
-	ATX              *ATXState                `json:"atx,omitempty"`
-	DC               *DCPowerState            `json:"dc,omitempty"`
-	Jiggler          bool                     `json:"jiggler"`
-	AvailableLayouts []string                 `json:"available_layouts"`
+	Video          native.VideoState        `json:"video"`
+	USB            string                   `json:"usb"`
+	KeyboardLayout string                   `json:"keyboard_layout"`
+	KeyboardLEDs   *usbgadget.KeyboardState `json:"keyboard_leds,omitempty"`
+	VirtualMedia   *VirtualMediaState       `json:"virtual_media,omitempty"`
+	PowerExtension string                   `json:"power_extension,omitempty"`
+	ATX            *ATXState                `json:"atx,omitempty"`
+	DC             *DCPowerState            `json:"dc,omitempty"`
+	Jiggler        mcpJigglerState          `json:"jiggler"`
+}
+
+type mcpJigglerState struct {
+	Enabled           bool   `json:"enabled"`
+	InactivitySeconds int    `json:"inactivity_seconds,omitempty"`
+	Schedule          string `json:"schedule,omitempty"`
+	Timezone          string `json:"timezone,omitempty"`
 }
 
 func mcpGetState(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.CallToolResult, mcpState, error) {
 	state := mcpState{
-		Video:            lastVideoState,
-		KeyboardLayout:   config.KeyboardLayout,
-		PowerExtension:   config.ActiveExtension,
-		Jiggler:          config.JigglerEnabled,
-		AvailableLayouts: keyboard.LayoutCodes(),
+		Video:          lastVideoState,
+		KeyboardLayout: config.KeyboardLayout,
+		PowerExtension: config.ActiveExtension,
+		Jiggler:        mcpJigglerState{Enabled: config.JigglerEnabled},
+	}
+	if jiggler := config.JigglerConfig; jiggler != nil && config.JigglerEnabled {
+		state.Jiggler.InactivitySeconds = jiggler.InactivityLimitSeconds
+		state.Jiggler.Schedule = jiggler.ScheduleCronTab
+		state.Jiggler.Timezone = jiggler.Timezone
 	}
 	if gadget != nil {
 		state.USB = rpcGetUSBState()
@@ -1120,14 +1175,12 @@ func mcpGetState(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.Ca
 }
 
 type mcpJigglerInput struct {
-	Enabled *bool `json:"enabled,omitempty" jsonschema:"true to turn the jiggler on, false to turn it off; leave out to only report the state"`
+	Enabled bool `json:"enabled" jsonschema:"true to turn the jiggler on, false to turn it off"`
 }
 
-func mcpJiggler(_ context.Context, _ *mcp.CallToolRequest, in mcpJigglerInput) (*mcp.CallToolResult, any, error) {
-	if in.Enabled != nil {
-		if err := rpcSetJigglerState(*in.Enabled); err != nil {
-			return nil, nil, err
-		}
+func mcpSetJiggler(_ context.Context, _ *mcp.CallToolRequest, in mcpJigglerInput) (*mcp.CallToolResult, any, error) {
+	if err := rpcSetJigglerState(in.Enabled); err != nil {
+		return nil, nil, err
 	}
 	if !config.JigglerEnabled {
 		return mcpDone("The jiggler is off.")
@@ -1148,6 +1201,89 @@ func mcpJiggler(_ context.Context, _ *mcp.CallToolRequest, in mcpJigglerInput) (
 	return mcpDone("%s", text)
 }
 
+type mcpLayoutInfo struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
+}
+
+type mcpLayoutList struct {
+	Current string          `json:"current" jsonschema:"the layout set in the JetKVM"`
+	Layouts []mcpLayoutInfo `json:"layouts"`
+}
+
+func mcpListKeyboardLayouts(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.CallToolResult, mcpLayoutList, error) {
+	list := mcpLayoutList{Current: config.KeyboardLayout}
+	for _, code := range keyboard.LayoutCodes() {
+		info := mcpLayoutInfo{Code: code}
+		if layout, ok := keyboard.FindLayout(code); ok {
+			info.Name = layout.Name
+		}
+		list.Layouts = append(list.Layouts, info)
+	}
+	return nil, list, nil
+}
+
+type mcpMediaFile struct {
+	Name string `json:"name" jsonschema:"the file name, as mount_media takes it"`
+	Size int64  `json:"size" jsonschema:"size in bytes"`
+}
+
+type mcpMediaList struct {
+	Files     []mcpMediaFile `json:"files"`
+	BytesUsed int64          `json:"bytes_used"`
+	BytesFree int64          `json:"bytes_free"`
+}
+
+func mcpListMedia(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.CallToolResult, mcpMediaList, error) {
+	list := mcpMediaList{Files: []mcpMediaFile{}}
+	files, err := rpcListStorageFiles()
+	if err != nil {
+		return nil, list, err
+	}
+	for _, f := range files.Files {
+		list.Files = append(list.Files, mcpMediaFile{Name: f.Filename, Size: f.Size})
+	}
+	if space, err := rpcGetStorageSpace(); err == nil {
+		list.BytesUsed, list.BytesFree = space.BytesUsed, space.BytesFree
+	}
+	return nil, list, nil
+}
+
+// schemaWithEnums returns the inferred input schema of a tool with the allowed
+// values of some string arguments listed, so a client and the model see them
+// in the schema instead of in prose only.
+func schemaWithEnums[In any](enums map[string][]string) *jsonschema.Schema {
+	schema, err := jsonschema.For[In](nil)
+	if err != nil {
+		panic(err)
+	}
+	for field, values := range enums {
+		prop := schema.Properties[field]
+		if prop == nil {
+			panic("no argument " + field)
+		}
+		for _, v := range values {
+			prop.Enum = append(prop.Enum, v)
+		}
+	}
+	return schema
+}
+
+type mcpKeyboardLayoutInput struct {
+	Layout string `json:"layout" jsonschema:"layout code from list_keyboard_layouts, such as de-DE or de-DE-macos"`
+}
+
+func mcpSetKeyboardLayout(_ context.Context, _ *mcp.CallToolRequest, in mcpKeyboardLayoutInput) (*mcp.CallToolResult, any, error) {
+	layout, ok := keyboard.FindLayout(in.Layout)
+	if !ok {
+		return nil, nil, fmt.Errorf("unknown layout %q, available: %s", in.Layout, strings.Join(keyboard.LayoutCodes(), ", "))
+	}
+	if err := rpcSetKeyboardLayout(layout.IsoCode); err != nil {
+		return nil, nil, err
+	}
+	return mcpDone("The JetKVM's keyboard layout is now %s (%s). type_text uses it unless given another.", layout.IsoCode, layout.Name)
+}
+
 func mcpWakeHost(_ context.Context, _ *mcp.CallToolRequest, _ mcpEmpty) (*mcp.CallToolResult, any, error) {
 	if err := requireHID(); err != nil {
 		return nil, nil, err
@@ -1165,7 +1301,7 @@ type mcpPowerInput struct {
 	Action string `json:"action" jsonschema:"power-short, power-long or reset with the ATX extension; on or off with the DC extension"`
 }
 
-func mcpPower(_ context.Context, _ *mcp.CallToolRequest, in mcpPowerInput) (*mcp.CallToolResult, any, error) {
+func mcpControlPower(_ context.Context, _ *mcp.CallToolRequest, in mcpPowerInput) (*mcp.CallToolResult, any, error) {
 	switch config.ActiveExtension {
 	case "atx-power":
 		if err := rpcSetATXPowerAction(in.Action); err != nil {
