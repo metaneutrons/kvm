@@ -9,29 +9,55 @@ access to them like access to the JetKVM itself.
 
 ## Enabling access
 
-1. Set a password for the JetKVM (Settings → Access → Local). The API token is
+1. Set a password for the JetKVM (Settings → Access → Local). API tokens are
    only available in password mode.
-2. Under Settings → Access → API Token, choose the permissions and select
-   **Create Token**. Copy the token right away; it is shown once and stored on
-   the device only as a hash.
+2. Under Settings → Access → API Tokens, enter a name for the client, tick the
+   permissions it needs, optionally set an expiry and select **Create Token**.
+   Copy the token right away; it is shown once and stored on the device only as
+   a hash.
 3. Send it with every request:
 
    ```
    Authorization: Bearer jkvm_…
    ```
 
-**Replace Token** issues a new token and invalidates the old one, **Delete
-Token** switches token access off. The token works for `/api` only, not for the
-web UI, password changes or settings. Failed attempts count towards the same
-rate limit as login attempts.
+Give every client its own token. Deleting one token cuts off that client and
+no other, and the audit log names the token behind each action. You can keep up
+to 16 tokens. The list shows when each was created, when it was last used and
+from which address (the last use is kept in memory and starts empty after a
+reboot), and when it expires. An expired token is refused with 401 until you
+delete it.
 
-A token has one of two permissions:
+A token works for `/api` only, not for the web UI, password changes or
+settings. Failed attempts count towards the same rate limit as login
+attempts.
 
-- **Full control**: screenshots, state, keyboard and mouse input, virtual
-  media and power.
-- **View only**: screenshots and state. It sends no input, mounts nothing and
-  calls no power action. Over MCP it offers only `screenshot`, `get_state` and
-  `wait`.
+### Permissions
+
+Every token can view; the others are added one by one, so a client only gets
+what it needs:
+
+| Permission | Allows | MCP tools |
+|---|---|---|
+| View | Screenshots and device status. Always included. | `screenshot`, `get_state`, `wait` |
+| Input | Keyboard, mouse and the mouse jiggler. | `move_mouse`, `click`, `drag`, `scroll`, `press_keys`, `type_text`, `jiggler` |
+| Virtual media | Mounting and unmounting images, uploading files. | `mount_media`, `unmount_media` |
+| Power | ATX and DC power, Wake-on-LAN and the USB wake-up. | `power`, `wake_host` |
+
+A call without the permission is refused, and an MCP connection only lists the
+tools its token covers. Input is close to full control of the host: anyone who
+can type on it can usually also do what the other permissions allow, so give
+Input only to clients you trust with that.
+
+### Turning MCP off
+
+The switch **MCP Server** under Settings → Access turns the endpoint
+`/api/mcp` off for everyone, tokens and login included; it then answers 404.
+The rest of the API keeps working. The switch is also there when the JetKVM
+runs without a password, where it is the only way to close MCP.
+
+Tokens from an earlier version are kept: the single token becomes an entry
+named "API token", with all permissions or view only, as it was.
 
 Requests from a browser that is logged in to the web UI also pass, as long as
 they come from the JetKVM's own pages. Requests that other websites make the
@@ -189,6 +215,6 @@ with `mountWithStorage` or the `mount_media` tool.
 
 Every action taken through `/api/rpc` or the MCP server, and every screenshot an
 agent takes, is logged by the `api` component of the device log at info level,
-whatever the default log level. Typed text is not logged, only its length.
-High-frequency input over `/api/rpc`, such as single mouse moves, is logged at
-debug level.
+whatever the default log level, with the name of the token used. Typed text is
+not logged, only its length. High-frequency input over `/api/rpc`, such as
+single mouse moves, is logged at debug level.

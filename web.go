@@ -219,9 +219,10 @@ func setupRouter() *gin.Engine {
 
 		protected.POST("/device/send-wol/:mac-addr", handleSendWOLMagicPacket)
 
-		protected.GET("/auth/api-token", handleGetAPIToken)
-		protected.POST("/auth/api-token", handleCreateAPIToken)
-		protected.DELETE("/auth/api-token", handleDeleteAPIToken)
+		protected.GET("/auth/api-tokens", handleListAPITokens)
+		protected.POST("/auth/api-tokens", handleCreateAPIToken)
+		protected.DELETE("/auth/api-tokens/:id", handleDeleteAPIToken)
+		protected.PUT("/auth/mcp", handleSetMCPEnabled)
 
 		protected.GET("/diagnostics", handleDiagnosticsDownload)
 	}
@@ -234,7 +235,7 @@ func setupRouter() *gin.Engine {
 		api.POST("/rpc", handleAPIRPC)
 		// Uploads start with the startStorageFileUpload RPC, which returns the
 		// uploadId for this request.
-		api.POST("/storage/upload", requireFullScope, handleUploadHttp)
+		api.POST("/storage/upload", requirePerm(permMedia), handleUploadHttp)
 		// In stateless mode the MCP handler answers GET and DELETE itself.
 		api.Any("/mcp", handleMCP)
 	}

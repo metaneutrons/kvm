@@ -317,7 +317,9 @@ export default function SettingsAccessIndexRoute() {
               </SettingsItem>
             )}
 
-            {apiCapability && loaderData.authMode === "password" && <ApiTokenSettings />}
+            {apiCapability && (
+              <ApiTokenSettings passwordMode={loaderData.authMode === "password"} />
+            )}
           </div>
           <div className="h-px w-full bg-slate-800/10 dark:bg-slate-300/20" />
         </>

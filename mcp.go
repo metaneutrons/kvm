@@ -83,7 +83,7 @@ func parseMCPScreen(raw string) (mcpScreen, error) {
 	return mcpScreen(width), nil
 }
 
-func (s mcpScreen) instructions(readOnly bool) string {
+func (s mcpScreen) instructions(perms apiPerm) string {
 	size := fmt.Sprintf("scaled to at most %d pixels wide", int(s))
 	if s == 0 {
 		size = "at the video's own resolution"
@@ -93,21 +93,33 @@ Take a screenshot first. It shows the whole screen, ` + size + `, and states the
 To read small text or check details, take a screenshot with a region: it returns that part of the screen enlarged up to the real resolution. Coordinates for the mouse tools stay those of the full screenshot; the response explains how to convert a point in the zoomed image.
 type_text types characters through a keyboard layout, which must match the layout the host uses; for a Mac pick the macOS variant, such as de-DE-macos (get_state lists them). press_keys sends key combinations by key name.
 Input tools take screenshot: true to return a screenshot once the screen has settled after the action, which saves a separate call. The wait tool waits for the screen to change or settle, for example while an app starts.
-If the screenshot reports no signal, the display may be asleep: press a key such as ShiftLeft or call wake_host, then take a new screenshot.` + viewOnlyNote(readOnly)
+If the screenshot reports no signal, the display may be asleep: press a key such as ShiftLeft or call wake_host, then take a new screenshot.` + permissionNote(perms)
 }
 
-func viewOnlyNote(readOnly bool) string {
-	if !readOnly {
+// permissionNote tells the model what its token does not allow, so it does
+// not look for tools that are not there.
+func permissionNote(perms apiPerm) string {
+	var missing []string
+	if perms&permInput == 0 {
+		missing = append(missing, "keyboard and mouse input")
+	}
+	if perms&permMedia == 0 {
+		missing = append(missing, "virtual media")
+	}
+	if perms&permPower == 0 {
+		missing = append(missing, "power control and wake")
+	}
+	if len(missing) == 0 {
 		return ""
 	}
-	return "\nThis connection uses a view-only token: only screenshot and get_state are available, and no input can be sent."
+	return "\nThis connection's token is limited: it has no access to " + strings.Join(missing, ", ") + ", so those tools are not available."
 }
 
 // mcpServerKey selects a server: the tool descriptions and coordinates depend
-// on the screen width, and a view-only token gets no input tools.
+// on the screen width, and a token only gets the tools its permissions cover.
 type mcpServerKey struct {
-	screen   mcpScreen
-	readOnly bool
+	screen mcpScreen
+	perms  apiPerm
 }
 
 var mcpServers sync.Map
@@ -119,11 +131,11 @@ var mcpHandler = sync.OnceValue(func() http.Handler {
 			if err != nil {
 				return nil
 			}
-			key := mcpServerKey{screen: screen, readOnly: apiScope(r.Context()) == apiScopeView}
+			key := mcpServerKey{screen: screen, perms: apiGrantFrom(r.Context()).perms}
 			if server, ok := mcpServers.Load(key); ok {
 				return server.(*mcp.Server)
 			}
-			server, _ := mcpServers.LoadOrStore(key, newMCPServer(key.screen, key.readOnly))
+			server, _ := mcpServers.LoadOrStore(key, newMCPServer(key.screen, key.perms))
 			return server.(*mcp.Server)
 		},
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
@@ -131,6 +143,10 @@ var mcpHandler = sync.OnceValue(func() http.Handler {
 })
 
 func handleMCP(c *gin.Context) {
+	if config.MCPDisabled {
+		c.JSON(http.StatusNotFound, gin.H{"error": "The MCP server is turned off on this device"})
+		return
+	}
 	if _, err := parseMCPScreen(c.Query("screen_width")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -156,7 +172,7 @@ func (a mcpAfter) wantsScreenshot() bool { return a.Screenshot }
 // active before the tool runs. If asked, it adds a screenshot of the result.
 func trackMCP[In, Out any](screen mcpScreen, name string, handler mcp.ToolHandlerFor[In, Out]) mcp.ToolHandlerFor[In, Out] {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
-		noteAgentAction("mcp", name, mcpActionDetail(in))
+		noteAgentAction(ctx, "mcp", name, mcpActionDetail(in))
 		result, out, err := handler(ctx, req, in)
 		after, ok := any(in).(interface{ wantsScreenshot() bool })
 		if err != nil || result == nil || !ok || !after.wantsScreenshot() {
@@ -190,10 +206,10 @@ func mcpActionDetail(in any) string {
 	return fmt.Sprintf("%+v", in)
 }
 
-func newMCPServer(screen mcpScreen, readOnly bool) *mcp.Server {
+func newMCPServer(screen mcpScreen, perms apiPerm) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "jetkvm", Title: "JetKVM", Version: builtAppVersion},
-		&mcp.ServerOptions{Instructions: screen.instructions(readOnly)},
+		&mcp.ServerOptions{Instructions: screen.instructions(perms)},
 	)
 
 	fullScreen := fmt.Sprintf("scaled to at most %d pixels wide", int(screen))
@@ -219,73 +235,76 @@ func newMCPServer(screen mcpScreen, readOnly bool) *mcp.Server {
 			"Live content such as a ticking clock or a CPU graph counts as a change, but does not keep the screen from being stable.",
 		Annotations: mcpReadOnly,
 	}, mcpWait)
-	if readOnly {
-		return server
+	if perms&permInput != 0 {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "move_mouse",
+			Description: "Move the mouse pointer to a screen position.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "move_mouse", screen.moveMouse))
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "click",
+			Description: "Move the mouse pointer to a screen position and click a button there.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "click", screen.click))
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "drag",
+			Description: "Press a mouse button at one screen position, move to another and release it there.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "drag", screen.drag))
+		mcp.AddTool(server, &mcp.Tool{
+			Name: "scroll",
+			Description: "Move the mouse pointer to a screen position and turn the scroll wheel there. " +
+				"Positive delta_y turns the wheel down, which scrolls down on Windows and Linux. macOS reverses it with natural scrolling, its default, " +
+				"so check the direction with a screenshot.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "scroll", screen.scroll))
+		mcp.AddTool(server, &mcp.Tool{
+			Name: "press_keys",
+			Description: "Press keys together and release them, for shortcuts and special keys. " +
+				`Keys are named after the physical US key position, as in the browser's KeyboardEvent.code: "KeyA", "Digit1", "Enter", "Tab", "Escape", "Backspace", "ArrowUp", "F5", "ControlLeft", "ShiftLeft", "AltLeft", "AltRight", "MetaLeft". ` +
+				`Ctrl, Shift, Alt, Cmd, Win and Esc are accepted as short forms. Example: ["ControlLeft", "KeyC"].`,
+			Annotations: mcpInput,
+		}, trackMCP(screen, "press_keys", mcpPressKeys))
+		mcp.AddTool(server, &mcp.Tool{
+			Name: "type_text",
+			Description: "Type text on the host's keyboard. Characters are mapped through a keyboard layout, " +
+				"which must match the layout the host uses: for a Mac use the macOS variant such as de-DE-macos or en-US-macos, for Windows and Linux the plain one such as de-DE. " +
+				"The default is the layout set in the JetKVM. Newlines press Enter. Fails without typing anything if a character is not in the layout.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "type_text", mcpTypeText))
+		mcp.AddTool(server, &mcp.Tool{
+			Name: "jiggler",
+			Description: "Turn the JetKVM's mouse jiggler on or off. While it is on, it moves the mouse by a few pixels when no input arrived for a while, " +
+				"which keeps the host from sleeping or locking its screen. The setting is saved on the JetKVM and stays until changed, also for people using the web UI. " +
+				"Without enabled, it only reports the current state.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "jiggler", mcpJiggler))
 	}
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "move_mouse",
-		Description: "Move the mouse pointer to a screen position.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "move_mouse", screen.moveMouse))
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "click",
-		Description: "Move the mouse pointer to a screen position and click a button there.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "click", screen.click))
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "drag",
-		Description: "Press a mouse button at one screen position, move to another and release it there.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "drag", screen.drag))
-	mcp.AddTool(server, &mcp.Tool{
-		Name: "scroll",
-		Description: "Move the mouse pointer to a screen position and turn the scroll wheel there. " +
-			"Positive delta_y turns the wheel down, which scrolls down on Windows and Linux. macOS reverses it with natural scrolling, its default, " +
-			"so check the direction with a screenshot.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "scroll", screen.scroll))
-	mcp.AddTool(server, &mcp.Tool{
-		Name: "press_keys",
-		Description: "Press keys together and release them, for shortcuts and special keys. " +
-			`Keys are named after the physical US key position, as in the browser's KeyboardEvent.code: "KeyA", "Digit1", "Enter", "Tab", "Escape", "Backspace", "ArrowUp", "F5", "ControlLeft", "ShiftLeft", "AltLeft", "AltRight", "MetaLeft". ` +
-			`Ctrl, Shift, Alt, Cmd, Win and Esc are accepted as short forms. Example: ["ControlLeft", "KeyC"].`,
-		Annotations: mcpInput,
-	}, trackMCP(screen, "press_keys", mcpPressKeys))
-	mcp.AddTool(server, &mcp.Tool{
-		Name: "type_text",
-		Description: "Type text on the host's keyboard. Characters are mapped through a keyboard layout, " +
-			"which must match the layout the host uses: for a Mac use the macOS variant such as de-DE-macos or en-US-macos, for Windows and Linux the plain one such as de-DE. " +
-			"The default is the layout set in the JetKVM. Newlines press Enter. Fails without typing anything if a character is not in the layout.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "type_text", mcpTypeText))
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "wake_host",
-		Description: "Send a USB remote wakeup signal to wake the host from sleep.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "wake_host", mcpWakeHost))
-	mcp.AddTool(server, &mcp.Tool{
-		Name: "jiggler",
-		Description: "Turn the JetKVM's mouse jiggler on or off. While it is on, it moves the mouse by a few pixels when no input arrived for a while, " +
-			"which keeps the host from sleeping or locking its screen. The setting is saved on the JetKVM and stays until changed, also for people using the web UI. " +
-			"Without enabled, it only reports the current state.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "jiggler", mcpJiggler))
-	mcp.AddTool(server, &mcp.Tool{
-		Name: "power",
-		Description: "Use the power extension. With the ATX extension: power-short presses the power button, power-long holds it for five seconds to force off, reset presses reset. " +
-			"With the DC extension: on and off switch the host's power supply.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "power", mcpPower))
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "mount_media",
-		Description: "Attach an image to the host as a USB drive, either from a URL or from a file in the JetKVM's storage.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "mount_media", mcpMountMedia))
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "unmount_media",
-		Description: "Detach the virtual USB drive from the host.",
-		Annotations: mcpInput,
-	}, trackMCP(screen, "unmount_media", mcpUnmountMedia))
+	if perms&permPower != 0 {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "wake_host",
+			Description: "Send a USB remote wakeup signal to wake the host from sleep.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "wake_host", mcpWakeHost))
+		mcp.AddTool(server, &mcp.Tool{
+			Name: "power",
+			Description: "Use the power extension. With the ATX extension: power-short presses the power button, power-long holds it for five seconds to force off, reset presses reset. " +
+				"With the DC extension: on and off switch the host's power supply.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "power", mcpPower))
+	}
+	if perms&permMedia != 0 {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "mount_media",
+			Description: "Attach an image to the host as a USB drive, either from a URL or from a file in the JetKVM's storage.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "mount_media", mcpMountMedia))
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "unmount_media",
+			Description: "Detach the virtual USB drive from the host.",
+			Annotations: mcpInput,
+		}, trackMCP(screen, "unmount_media", mcpUnmountMedia))
+	}
 
 	return server
 }
@@ -354,8 +373,8 @@ func (s mcpScreen) snapshotOptions(quality int, region *mcpRegion, videoWidth, v
 	return opts, nil
 }
 
-func (s mcpScreen) screenshot(_ context.Context, _ *mcp.CallToolRequest, in mcpScreenshotInput) (*mcp.CallToolResult, any, error) {
-	noteAgentView("mcp", "screenshot")
+func (s mcpScreen) screenshot(ctx context.Context, _ *mcp.CallToolRequest, in mcpScreenshotInput) (*mcp.CallToolResult, any, error) {
+	noteAgentView(ctx, "mcp", "screenshot")
 	content, err := s.capture(in.Quality, in.Region)
 	if err != nil {
 		return nil, nil, err

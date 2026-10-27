@@ -407,9 +407,8 @@ func TestMCPInputToolsOfferScreenshot(t *testing.T) {
 	}
 }
 
-func TestMCPViewOnlyToken(t *testing.T) {
-	token := setUpAPITest(t)
-	config.APITokenScope = apiScopeView
+func connectMCPWithToken(t *testing.T, token string) *mcp.ClientSession {
+	t.Helper()
 	r := newAPITestRouter()
 	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
 	srv := httptest.NewServer(r)
@@ -424,16 +423,56 @@ func TestMCPViewOnlyToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = session.Close() })
-	res, err := session.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
+	return session
+}
+
+func TestMCPToolsFollowPermissions(t *testing.T) {
+	inputTools := []string{"click", "drag", "jiggler", "move_mouse", "press_keys", "scroll", "type_text"}
+	tests := []struct {
+		perms []string
+		want  []string
+	}{
+		{[]string{"view"}, []string{"get_state", "screenshot", "wait"}},
+		{[]string{"input"}, append([]string{"get_state", "screenshot", "wait"}, inputTools...)},
+		{[]string{"media"}, []string{"get_state", "mount_media", "screenshot", "unmount_media", "wait"}},
+		{[]string{"power"}, []string{"get_state", "power", "screenshot", "wait", "wake_host"}},
 	}
-	var names []string
-	for _, tool := range res.Tools {
-		names = append(names, tool.Name)
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.perms, "+"), func(t *testing.T) {
+			token := setUpAPITestPerms(t, tt.perms...)
+			res, err := connectMCPWithToken(t, token).ListTools(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, tool := range res.Tools {
+				names = append(names, tool.Name)
+			}
+			slices.Sort(names)
+			want := slices.Clone(tt.want)
+			slices.Sort(want)
+			if !slices.Equal(names, want) {
+				t.Errorf("tools %v, want %v", names, want)
+			}
+		})
 	}
-	slices.Sort(names)
-	if want := []string{"get_state", "screenshot", "wait"}; !slices.Equal(names, want) {
-		t.Errorf("view-only tools %v, want %v", names, want)
+}
+
+func TestMCPCanBeTurnedOff(t *testing.T) {
+	token := setUpAPITest(t)
+	r := newAPITestRouter()
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
+
+	config.MCPDisabled = true
+	if w := doAPIRequest(r, http.MethodPost, "/api/mcp", `{}`, token, ""); w.Code != http.StatusNotFound {
+		t.Errorf("MCP turned off: status %d, want 404", w.Code)
+	}
+	// Without credentials the answer does not reveal the setting.
+	if w := doAPIRequest(r, http.MethodPost, "/api/mcp", `{}`, "", ""); w.Code != http.StatusUnauthorized {
+		t.Errorf("MCP turned off, no credentials: status %d, want 401", w.Code)
+	}
+	// The API itself keeps working.
+	if w := doAPIRequest(r, http.MethodPost, "/api/rpc", `{"jsonrpc":"2.0","method":"ping","id":1}`, token, ""); w.Code != http.StatusOK {
+		t.Errorf("API with MCP turned off: status %d, want 200", w.Code)
 	}
 }

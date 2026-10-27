@@ -2,11 +2,6 @@ package kvm
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,122 +10,148 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// A token either has full control or may only look: a view-only token takes
-// screenshots and reads state, but sends no input, mounts nothing and calls
-// no power action.
+// A token carries a set of permissions. Viewing the screen and reading state
+// is part of every token; input, virtual media and power control are added
+// one by one, so a token only has what its client needs. The login cookie has
+// all of them.
+type apiPerm uint8
+
 const (
-	apiScopeFull = "full"
-	apiScopeView = "view"
+	permView apiPerm = 1 << iota
+	permInput
+	permMedia
+	permPower
+
+	permAll = permView | permInput | permMedia | permPower
 )
 
-type apiScopeKey struct{}
-
-// apiScope returns the scope of the request's credentials. The login cookie
-// has full control.
-func apiScope(ctx context.Context) string {
-	if scope, ok := ctx.Value(apiScopeKey{}).(string); ok {
-		return scope
-	}
-	return apiScopeFull
+var apiPermNames = []struct {
+	perm apiPerm
+	name string
+}{
+	{permView, "view"},
+	{permInput, "input"},
+	{permMedia, "media"},
+	{permPower, "power"},
 }
 
-func tokenScope() string {
-	if config.APITokenScope == apiScopeView {
-		return apiScopeView
+func (p apiPerm) names() []string {
+	var names []string
+	for _, n := range apiPermNames {
+		if p&n.perm != 0 {
+			names = append(names, n.name)
+		}
 	}
-	return apiScopeFull
+	return names
 }
 
-// isViewMethod reports whether a JSON-RPC method only reads state.
-func isViewMethod(method string) bool {
-	return method == "ping" || strings.HasPrefix(method, "get") || strings.HasPrefix(method, "list")
+// parseAPIPerms turns permission names into a set. view is always included.
+func parseAPIPerms(names []string) (apiPerm, error) {
+	perms := permView
+	for _, name := range names {
+		found := false
+		for _, n := range apiPermNames {
+			if n.name == name {
+				perms |= n.perm
+				found = true
+			}
+		}
+		if !found {
+			return 0, fmt.Errorf("unknown permission %q", name)
+		}
+	}
+	return perms, nil
 }
 
-// requireFullScope rejects a view-only token.
-func requireFullScope(c *gin.Context) {
-	if apiScope(c.Request.Context()) != apiScopeFull {
-		sendErrorJsonThenAbort(c, http.StatusForbidden, "This API token is view-only")
-		return
+// apiGrant is what a request's credentials allow.
+type apiGrant struct {
+	perms   apiPerm
+	tokenID string
+	name    string
+}
+
+type apiGrantKey struct{}
+
+// apiGrantFrom returns the grant of the request's credentials. Without a
+// token the request came with the login cookie, which has all permissions.
+func apiGrantFrom(ctx context.Context) apiGrant {
+	if grant, ok := ctx.Value(apiGrantKey{}).(apiGrant); ok {
+		return grant
 	}
-	c.Next()
+	return apiGrant{perms: permAll}
+}
+
+func apiAllowed(ctx context.Context, perm apiPerm) bool {
+	return apiGrantFrom(ctx).perms&perm == perm
+}
+
+// requirePerm rejects a request whose token lacks the permission.
+func requirePerm(perm apiPerm) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !apiAllowed(c.Request.Context(), perm) {
+			sendErrorJsonThenAbort(c, http.StatusForbidden, "This API token lacks the permission for this request")
+			return
+		}
+		c.Next()
+	}
 }
 
 // The routes under /api are meant for scripts and agents. Besides the login
-// cookie they accept an API token as "Authorization: Bearer <token>". The
-// token is generated on the device, shown once and stored only as a SHA-256
-// hash; without one, bearer authentication is off. It is valid for /api only,
+// cookie they accept an API token as "Authorization: Bearer <token>". Tokens
+// are generated on the device, shown once and stored only as a SHA-256 hash;
+// without any, bearer authentication is off. A token is valid for /api only,
 // not for the UI routes, password changes or WebRTC signaling.
 
 const apiTokenPrefix = "jkvm_"
 
-// apiRPCMethods are the JSON-RPC methods /api/rpc may call: state queries,
-// input, virtual media and power. Device administration (developer mode, SSH
-// keys, TLS, cloud, network, updates, factory reset) stays with the UI, so a
-// leaked token cannot take over the JetKVM itself. Methods that need a
-// WebRTC session are not listed, as an HTTP call has none.
-var apiRPCMethods = map[string]bool{
-	"ping":                   true,
-	"getDeviceID":            true,
-	"getDeviceCapabilities":  true,
-	"getLocalVersion":        true,
-	"getNetworkState":        true,
-	"getVideoState":          true,
-	"getUSBState":            true,
-	"getEDID":                true,
-	"getKeyboardLayout":      true,
-	"getKeyboardLedState":    true,
-	"getKeyDownState":        true,
-	"keyboardReport":         true,
-	"keypressReport":         true,
-	"absMouseReport":         true,
-	"relMouseReport":         true,
-	"wheelReport":            true,
-	"wakeHost":               true,
-	"getJigglerState":        true,
-	"setJigglerState":        true,
-	"getJigglerConfig":       true,
-	"getVirtualMediaState":   true,
-	"getStorageSpace":        true,
-	"listStorageFiles":       true,
-	"startStorageFileUpload": true,
-	"checkMountUrl":          true,
-	"mountWithHTTP":          true,
-	"mountWithStorage":       true,
-	"rpcMountBuiltInImage":   true,
-	"unmountImage":           true,
-	"getActiveExtension":     true,
-	"getATXState":            true,
-	"setATXPowerAction":      true,
-	"getDCPowerState":        true,
-	"setDCPowerState":        true,
-	"getWakeOnLanDevices":    true,
-	"sendWOLMagicPacket":     true,
+// apiRPCMethods are the JSON-RPC methods /api/rpc may call, with the
+// permission each needs: state queries, input, virtual media and power.
+// Device administration (developer mode, SSH keys, TLS, cloud, network,
+// updates, factory reset) stays with the UI, so a leaked token cannot take
+// over the JetKVM itself. Methods that need a WebRTC session are not listed,
+// as an HTTP call has none.
+var apiRPCMethods = map[string]apiPerm{
+	"ping":                  permView,
+	"getDeviceID":           permView,
+	"getDeviceCapabilities": permView,
+	"getLocalVersion":       permView,
+	"getNetworkState":       permView,
+	"getVideoState":         permView,
+	"getUSBState":           permView,
+	"getEDID":               permView,
+	"getKeyboardLayout":     permView,
+	"getKeyboardLedState":   permView,
+	"getKeyDownState":       permView,
+	"getJigglerState":       permView,
+	"getJigglerConfig":      permView,
+	"getVirtualMediaState":  permView,
+	"getStorageSpace":       permView,
+	"listStorageFiles":      permView,
+	"getActiveExtension":    permView,
+	"getATXState":           permView,
+	"getDCPowerState":       permView,
+	"getWakeOnLanDevices":   permView,
+
+	"keyboardReport":  permInput,
+	"keypressReport":  permInput,
+	"absMouseReport":  permInput,
+	"relMouseReport":  permInput,
+	"wheelReport":     permInput,
+	"setJigglerState": permInput,
+
+	"startStorageFileUpload": permMedia,
+	"checkMountUrl":          permMedia,
+	"mountWithHTTP":          permMedia,
+	"mountWithStorage":       permMedia,
+	"rpcMountBuiltInImage":   permMedia,
+	"unmountImage":           permMedia,
+
+	"wakeHost":           permPower,
+	"setATXPowerAction":  permPower,
+	"setDCPowerState":    permPower,
+	"sendWOLMagicPacket": permPower,
 }
 
-func hashAPIToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
-
-func newAPIToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return apiTokenPrefix + base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-// isValidAPIToken compares in constant time; the hashes have a fixed length.
-func isValidAPIToken(token string) bool {
-	if config.APITokenHash == "" || !strings.HasPrefix(token, apiTokenPrefix) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(hashAPIToken(token)), []byte(config.APITokenHash)) == 1
-}
-
-// apiAuthMiddleware accepts an API token as bearer token and otherwise falls
-// back to the login cookie. Failed token attempts count against the login
-// rate limit.
 // /api accepts the login cookie as well, and gin parses a text/plain body as
 // JSON, so a page on another site could send requests that the browser does
 // not preflight. Reject cross-site browser requests; clients that are not
@@ -145,6 +166,9 @@ func apiCrossOriginMiddleware(c *gin.Context) {
 	c.Next()
 }
 
+// apiAuthMiddleware accepts an API token as bearer token and otherwise falls
+// back to the login cookie. Failed token attempts count against the login
+// rate limit.
 func apiAuthMiddleware() gin.HandlerFunc {
 	cookieAuth := protectedMiddleware()
 	return func(c *gin.Context) {
@@ -168,89 +192,21 @@ func apiAuthMiddleware() gin.HandlerFunc {
 			sendErrorJsonThenAbort(c, http.StatusTooManyRequests, "Too many failed attempts. Please try again later.")
 			return
 		}
-		if !isValidAPIToken(strings.TrimSpace(token)) {
+		entry, ok := findAPIToken(strings.TrimSpace(token))
+		if !ok {
 			passwordRateLimiter.RecordFailure(ip)
 			sendErrorJsonThenAbort(c, http.StatusUnauthorized, "Unauthorized")
 			return
 		}
-		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), apiScopeKey{}, tokenScope()))
-		c.Next()
-	}
-}
-
-type apiTokenState struct {
-	Enabled   bool   `json:"enabled"`
-	CreatedAt string `json:"created_at,omitempty"`
-	Scope     string `json:"scope,omitempty"`
-}
-
-func handleGetAPIToken(c *gin.Context) {
-	state := apiTokenState{Enabled: config.APITokenHash != ""}
-	if state.Enabled {
-		state.CreatedAt = config.APITokenCreatedAt
-		state.Scope = tokenScope()
-	}
-	c.JSON(http.StatusOK, state)
-}
-
-// setAPIToken stores the token hash and keeps the previous token if the
-// configuration cannot be saved, so the response matches what is in effect.
-func setAPIToken(hash, createdAt, scope string) error {
-	prevHash, prevCreatedAt, prevScope := config.APITokenHash, config.APITokenCreatedAt, config.APITokenScope
-	config.APITokenHash, config.APITokenCreatedAt, config.APITokenScope = hash, createdAt, scope
-	if err := SaveConfig(); err != nil {
-		config.APITokenHash, config.APITokenCreatedAt, config.APITokenScope = prevHash, prevCreatedAt, prevScope
-		return err
-	}
-	return nil
-}
-
-// handleCreateAPIToken creates a new token, replacing an existing one. The
-// token is only returned here and cannot be read back later.
-func handleCreateAPIToken(c *gin.Context) {
-	var req struct {
-		Scope string `json:"scope"`
-	}
-	// The body is optional; without one the token has full control.
-	if c.Request.ContentLength > 0 {
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		if entry.expired(time.Now()) {
+			sendErrorJsonThenAbort(c, http.StatusUnauthorized, "This API token has expired")
 			return
 		}
+		noteAPITokenUse(entry.ID, ip)
+		grant := apiGrant{perms: entry.perms(), tokenID: entry.ID, name: entry.Name}
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), apiGrantKey{}, grant))
+		c.Next()
 	}
-	scope := ""
-	switch req.Scope {
-	case "", apiScopeFull:
-	case apiScopeView:
-		scope = apiScopeView
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "scope must be full or view"})
-		return
-	}
-
-	token, err := newAPIToken()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-		return
-	}
-
-	if err := setAPIToken(hashAPIToken(token), time.Now().UTC().Format(time.RFC3339), scope); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
-		return
-	}
-
-	logger.Info().Str("ip", c.ClientIP()).Str("scope", tokenScope()).Msg("API token created")
-	c.JSON(http.StatusOK, gin.H{"token": token, "created_at": config.APITokenCreatedAt, "scope": tokenScope()})
-}
-
-func handleDeleteAPIToken(c *gin.Context) {
-	if err := setAPIToken("", "", ""); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
-		return
-	}
-
-	logger.Info().Str("ip", c.ClientIP()).Msg("API token deleted")
-	c.JSON(http.StatusOK, gin.H{"message": "API token deleted"})
 }
 
 // handleAPIRPC answers a single JSON-RPC 2.0 request with the same handlers
@@ -267,7 +223,8 @@ func handleAPIRPC(c *gin.Context) {
 	}
 
 	handler, ok := rpcHandlers[request.Method]
-	if !ok || !apiRPCMethods[request.Method] {
+	perm, listed := apiRPCMethods[request.Method]
+	if !ok || !listed {
 		c.JSON(http.StatusOK, JSONRPCResponse{
 			JSONRPC: "2.0",
 			Error:   map[string]any{"code": -32601, "message": "Method not found"},
@@ -276,16 +233,17 @@ func handleAPIRPC(c *gin.Context) {
 		return
 	}
 
-	if !isViewMethod(request.Method) {
-		if apiScope(c.Request.Context()) != apiScopeFull {
-			c.JSON(http.StatusOK, JSONRPCResponse{
-				JSONRPC: "2.0",
-				Error:   map[string]any{"code": -32001, "message": "This API token is view-only"},
-				ID:      request.ID,
-			})
-			return
-		}
-		noteAgentAction("rpc", request.Method, "")
+	ctx := c.Request.Context()
+	if !apiAllowed(ctx, perm) {
+		c.JSON(http.StatusOK, JSONRPCResponse{
+			JSONRPC: "2.0",
+			Error:   map[string]any{"code": -32001, "message": "This API token lacks the permission for this method"},
+			ID:      request.ID,
+		})
+		return
+	}
+	if perm != permView {
+		noteAgentAction(ctx, "rpc", request.Method, "")
 	}
 
 	scopedLogger := jsonRpcLogger.With().

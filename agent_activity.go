@@ -1,6 +1,7 @@
 package kvm
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -22,6 +23,9 @@ type agentActivityEvent struct {
 	Active bool   `json:"active"`
 	Source string `json:"source,omitempty"`
 	Action string `json:"action,omitempty"`
+	// Token names the API token that was used. It is empty for the login
+	// cookie and when the credentials are not known.
+	Token string `json:"token,omitempty"`
 }
 
 var agentActivity struct {
@@ -43,12 +47,13 @@ var highFrequencyActions = map[string]bool{
 
 // noteAgentAction logs an action taken through the API and tells the UI that
 // an agent is active. detail must not contain typed text.
-func noteAgentAction(source, action, detail string) {
+func noteAgentAction(ctx context.Context, source, action, detail string) {
+	token := apiTokenName(ctx)
 	event := apiLogger.Info()
 	if highFrequencyActions[action] {
 		event = apiLogger.Debug()
 	}
-	event.Str("source", source).Str("action", action).Str("detail", detail).Msg("agent action")
+	event.Str("source", source).Str("action", action).Str("detail", detail).Str("token", token).Msg("agent action")
 
 	agentActivity.mu.Lock()
 	now := time.Now()
@@ -64,14 +69,23 @@ func noteAgentAction(source, action, detail string) {
 	agentActivity.mu.Unlock()
 
 	if notify {
-		sendAgentActivity(agentActivityEvent{Active: true, Source: source, Action: action})
+		sendAgentActivity(agentActivityEvent{Active: true, Source: source, Action: action, Token: token})
 	}
 }
 
 // noteAgentView logs that an agent looked at the screen or read state. It
 // sends no input, so the UI is not told.
-func noteAgentView(source, action string) {
-	apiLogger.Info().Str("source", source).Str("action", action).Msg("agent view")
+func noteAgentView(ctx context.Context, source, action string) {
+	apiLogger.Info().Str("source", source).Str("action", action).Str("token", apiTokenName(ctx)).Msg("agent view")
+}
+
+// apiTokenName returns the name of the token behind a request, or "" for the
+// login cookie.
+func apiTokenName(ctx context.Context) string {
+	if grant, ok := ctx.Value(apiGrantKey{}).(apiGrant); ok {
+		return grant.name
+	}
+	return ""
 }
 
 func sendAgentActivity(event agentActivityEvent) {
