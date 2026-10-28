@@ -425,11 +425,13 @@ type SSHKeyState struct {
 // tls, local_loopback, log_level, tailscale: the HTTPS setting (Access page),
 // the loopback-only setting and the default log level (Advanced page) and the
 // Tailscale card (Network page), each shown only when reported.
+// api: the /api routes (JSON-RPC, upload) and the API tokens under
+// /auth/api-tokens exist.
 func rpcGetDeviceCapabilities() ([]string, error) {
 	return []string{
 		"shell", "extensions", "usb_serial", "custom_edid", "upload_channel", "video_during_update",
 		"http_proxy", "domain", "mdns", "ipv6",
-		"tls", "local_loopback", "log_level", "tailscale",
+		"tls", "local_loopback", "log_level", "tailscale", "api",
 	}, nil
 }
 

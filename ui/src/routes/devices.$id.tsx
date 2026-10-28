@@ -388,7 +388,23 @@ export default function KvmIdRoute() {
   const [hasUpdated, setHasUpdated] = useState(false);
   const { navigateTo } = useDeviceUiNavigation();
 
+  // Set while a script or AI agent sends input through the API, so a person
+  // watching knows where keyboard and mouse input comes from.
+  const [agentAction, setAgentAction] = useState<string | null>(null);
+  useEffect(() => {
+    if (!agentAction) return;
+    // The device ends the activity after 10 seconds; clear it here as well in
+    // case that event is lost.
+    const timer = setTimeout(() => setAgentAction(null), 15000);
+    return () => clearTimeout(timer);
+  }, [agentAction]);
+
   function onJsonRpcRequest(resp: JsonRpcRequest) {
+    if (resp.method === "agentActivity") {
+      const { active, action } = resp.params as { active: boolean; action?: string };
+      setAgentAction(active ? (action ?? "") : null);
+    }
+
     if (resp.method === "otherSessionConnected") {
       navigateTo("/other-session");
     }
@@ -765,6 +781,13 @@ export default function KvmIdRoute() {
           )}
 
           <div className="relative flex h-full w-full overflow-hidden">
+            {agentAction !== null && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-12 z-20 flex justify-center px-4">
+                <div className="rounded-full bg-amber-500/90 px-3 py-1 text-xs font-medium text-white shadow-sm">
+                  {m.agent_activity_banner({ action: agentAction })}
+                </div>
+              </div>
+            )}
             {isFailsafeMode && failsafeReason === "native" ? null : (
               <WebRTCVideo
                 hasConnectionIssues={!!ConnectionStatusElement}
