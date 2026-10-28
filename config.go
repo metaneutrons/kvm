@@ -88,18 +88,24 @@ func (m *KeyboardMacro) Validate() error {
 }
 
 type Config struct {
-	CloudURL             string               `json:"cloud_url"`
-	UpdateAPIURL         string               `json:"update_api_url"`
-	CloudAppURL          string               `json:"cloud_app_url"`
-	CloudToken           string               `json:"cloud_token"`
-	TailscaleControlURL  string               `json:"tailscale_control_url,omitempty"`
-	GoogleIdentity       string               `json:"google_identity"`
-	JigglerEnabled       bool                 `json:"jiggler_enabled"`
-	JigglerConfig        *JigglerConfig       `json:"jiggler_config"`
-	AutoUpdateEnabled    bool                 `json:"auto_update_enabled"`
-	IncludePreRelease    bool                 `json:"include_pre_release"`
-	HashedPassword       string               `json:"hashed_password"`
-	LocalAuthToken       string               `json:"local_auth_token"`
+	CloudURL            string         `json:"cloud_url"`
+	UpdateAPIURL        string         `json:"update_api_url"`
+	CloudAppURL         string         `json:"cloud_app_url"`
+	CloudToken          string         `json:"cloud_token"`
+	TailscaleControlURL string         `json:"tailscale_control_url,omitempty"`
+	GoogleIdentity      string         `json:"google_identity"`
+	JigglerEnabled      bool           `json:"jiggler_enabled"`
+	JigglerConfig       *JigglerConfig `json:"jiggler_config"`
+	AutoUpdateEnabled   bool           `json:"auto_update_enabled"`
+	IncludePreRelease   bool           `json:"include_pre_release"`
+	HashedPassword      string         `json:"hashed_password"`
+	LocalAuthToken      string         `json:"local_auth_token"`
+	APITokens           []APIToken     `json:"api_tokens,omitempty"`
+	MCPDisabled         bool           `json:"mcp_disabled,omitempty"`
+	// The single token of earlier versions. LoadConfig moves it into APITokens.
+	APITokenHash         string               `json:"api_token_hash,omitempty"`
+	APITokenCreatedAt    string               `json:"api_token_created_at,omitempty"`
+	APITokenScope        string               `json:"api_token_scope,omitempty"`
 	LocalAuthMode        string               `json:"localAuthMode"` //TODO: fix it with migration
 	LocalLoopbackOnly    bool                 `json:"local_loopback_only"`
 	WakeOnLanDevices     []WakeOnLanDevice    `json:"wake_on_lan_devices"`
@@ -325,6 +331,10 @@ func LoadConfig() {
 		strings.EqualFold(loadedConfig.EdidString, jkvV1NoHighRefresh) ||
 		strings.EqualFold(loadedConfig.EdidString, jkvV1CtaOnly120) {
 		loadedConfig.EdidString = native.DefaultEDID
+	}
+
+	if migrateLegacyAPIToken(&loadedConfig) {
+		logger.Info().Msg("moved the API token into the token list")
 	}
 
 	config = &loadedConfig

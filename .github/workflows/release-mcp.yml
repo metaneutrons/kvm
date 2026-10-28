@@ -1,0 +1,87 @@
+name: release-mcp
+# Builds the app with the MCP server and attaches it to a GitHub release when
+# a tag mcp/v<version> is pushed, for example mcp/v0.5.10-mcp.1. The binary is
+# not signed with JetKVM's key and is installed over SSH, see the release
+# notes. Pick a version above the current upstream release, so that the
+# device's auto-update does not replace it at once.
+on:
+  push:
+    tags: ["mcp/v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    if: github.repository == 'metaneutrons/kvm'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read the version from the tag
+        run: |
+          version="${GITHUB_REF_NAME#mcp/v}"
+          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "Tag $GITHUB_REF_NAME does not end in a semantic version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Prepare Docker build context
+        run: ./scripts/ci_helper.sh prepare
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.DOCKER_BUILD_CONTEXT_DIR }}
+          file: ${{ env.DOCKER_BUILD_CONTEXT_DIR }}/Dockerfile.build
+          tags: ${{ env.DOCKER_BUILD_TAG }}
+          push: false
+          load: true
+      - uses: actions/cache@v5
+        with:
+          path: internal/native/cgo/build
+          key: jetkvm-cgo-${{ hashFiles('internal/native/cgo/**/*.c', 'internal/native/cgo/**/*.h', 'internal/native/cgo/**/*.patch', 'internal/native/cgo/**/*.txt', 'internal/native/cgo/**/*.sh', '!internal/native/cgo/build/**') }}
+          restore-keys: jetkvm-cgo-
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: "**/package-lock.json"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "^1.25.1"
+      - name: Build frontend
+        run: make frontend
+      - name: Build application
+        run: ./scripts/ci_helper.sh make build_release VERSION="$VERSION"
+      - name: Run tests
+        run: go test ./...
+      - name: Checksum
+        run: |
+          cd bin
+          sha256sum jetkvm_app > jetkvm_app.sha256
+          cat jetkvm_app.sha256
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          JetKVM app ${VERSION} with the built-in MCP server (\`/api/mcp\`), built from ${GITHUB_SHA::7}.
+
+          **Unofficial build.** It is not signed by JetKVM and gets no support from them. Install it only if you are comfortable using SSH on your JetKVM.
+
+          ### Install
+          1. In the JetKVM web UI, enable Developer Mode and add your SSH key (Settings → Advanced).
+          2. Turn off automatic updates (Settings → General), or the device may replace this build with the official one.
+          3. Download \`jetkvm_app\`, check it against \`jetkvm_app.sha256\` (on macOS \`shasum -a 256 -c jetkvm_app.sha256\`) and install it:
+             \`\`\`
+             sha256sum -c jetkvm_app.sha256
+             ssh root@<jetkvm> "cat > /userdata/jetkvm/jetkvm_app.update" < jetkvm_app
+             ssh root@<jetkvm> reboot
+             \`\`\`
+          4. Create an API token under Settings → Access and connect your MCP client as described in [docs/api-and-mcp.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/api-and-mcp.md).
+
+          ### Back to the official firmware
+          Turn automatic updates on again, or update from Settings → General.
+          EOF
+          gh release create "$GITHUB_REF_NAME" bin/jetkvm_app bin/jetkvm_app.sha256 \
+            --title "JetKVM MCP ${VERSION}" --notes-file notes.md --prerelease --verify-tag

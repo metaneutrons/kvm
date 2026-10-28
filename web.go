@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jetkvm/kvm/internal/diagnostics"
 	"github.com/jetkvm/kvm/internal/logging"
+	"github.com/jetkvm/kvm/internal/native"
 	"github.com/jetkvm/kvm/internal/supervisor"
 	"github.com/pion/webrtc/v4"
 	"github.com/prometheus/client_golang/prometheus"
@@ -112,6 +114,11 @@ func setupRouter() *gin.Engine {
 	r.Use(gin_logger.SetLogger(
 		gin_logger.WithLogger(func(*gin.Context, zerolog.Logger) zerolog.Logger {
 			return *ginLogger
+		}),
+		// 503 means the host sends no video or the video is paused, which is a
+		// normal state rather than a fault of the device.
+		gin_logger.WithSpecificLogLevelByStatusCode(map[int]zerolog.Level{
+			http.StatusServiceUnavailable: zerolog.WarnLevel,
 		}),
 	))
 
@@ -212,7 +219,25 @@ func setupRouter() *gin.Engine {
 
 		protected.POST("/device/send-wol/:mac-addr", handleSendWOLMagicPacket)
 
+		protected.GET("/auth/api-tokens", handleListAPITokens)
+		protected.POST("/auth/api-tokens", handleCreateAPIToken)
+		protected.DELETE("/auth/api-tokens/:id", handleDeleteAPIToken)
+		protected.PUT("/auth/mcp", handleSetMCPEnabled)
+
 		protected.GET("/diagnostics", handleDiagnosticsDownload)
+	}
+
+	// API routes for scripts and agents (login cookie or API token)
+	api := r.Group("/api")
+	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
+	{
+		api.GET("/video/snapshot", handleVideoSnapshot)
+		api.POST("/rpc", handleAPIRPC)
+		// Uploads start with the startStorageFileUpload RPC, which returns the
+		// uploadId for this request.
+		api.POST("/storage/upload", requirePerm(permMedia), handleUploadHttp)
+		// In stateless mode the MCP handler answers GET and DELETE itself.
+		api.Any("/mcp", handleMCP)
 	}
 
 	// Catch-all route for SPA
@@ -892,6 +917,65 @@ func handleSendWOLMagicPacket(c *gin.Context) {
 	}
 
 	c.String(http.StatusOK, "WOL sent to %s ", macAddr)
+}
+
+// handleVideoSnapshot serves the current HDMI frame as JPEG. Optional query
+// parameters: quality (1-99); x, y, w and h select a region in video pixels;
+// width scales the image down to that width, keeping the aspect ratio.
+func handleVideoSnapshot(c *gin.Context) {
+	opts := native.SnapshotOptions{Quality: native.DefaultSnapshotQuality}
+	params := []struct {
+		name     string
+		dst      *int
+		min, max int
+	}{
+		{"quality", &opts.Quality, 1, 99},
+		{"x", &opts.CropX, 0, 1 << 15},
+		{"y", &opts.CropY, 0, 1 << 15},
+		{"w", &opts.CropWidth, 16, 1 << 15},
+		{"h", &opts.CropHeight, 16, 1 << 15},
+		{"width", &opts.Width, 16, 1 << 15},
+	}
+	for _, p := range params {
+		raw := c.Query(p.name)
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < p.min || v > p.max {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s must be between %d and %d", p.name, p.min, p.max)})
+			return
+		}
+		*p.dst = v
+	}
+	if (opts.CropWidth == 0) != (opts.CropHeight == 0) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "a region needs both w and h"})
+		return
+	}
+
+	jpeg, err := takeVideoSnapshot(opts)
+	var noSignal errNoVideoSignal
+	switch {
+	case errors.As(err, &noSignal):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error(), "reason": noSignal.reason})
+		return
+	case errors.Is(err, errVideoPaused), errors.Is(err, native.ErrVideoNotStreaming):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	case errors.Is(err, native.ErrSnapshotTimeout):
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": err.Error()})
+		return
+	case errors.Is(err, native.ErrSnapshotInvalid):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "the region is outside the video or too small to scale this far"})
+		return
+	case err != nil:
+		logger.Warn().Err(err).Msg("failed to take video snapshot")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to take video snapshot"})
+		return
+	}
+
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "image/jpeg", jpeg)
 }
 
 func handleDiagnosticsDownload(c *gin.Context) {

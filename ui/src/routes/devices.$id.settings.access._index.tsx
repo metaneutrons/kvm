@@ -5,6 +5,7 @@ import { ShieldCheckIcon } from "@heroicons/react/24/outline";
 
 import { useDeviceUiNavigation } from "@hooks/useAppNavigation";
 import { JsonRpcResponse, useJsonRpc } from "@hooks/useJsonRpc";
+import ApiTokenSettings from "@components/ApiTokenSettings";
 import { GridCard } from "@components/Card";
 import { Button, LinkButton } from "@components/Button";
 import { InputFieldWithLabel } from "@components/InputField";
@@ -56,6 +57,7 @@ export default function SettingsAccessIndexRoute() {
   const [selectedProvider, setSelectedProvider] = useState<string>("jetkvm");
   const [tlsMode, setTlsMode] = useState<string>("unknown");
   const tls = useCapability("tls");
+  const apiCapability = useCapability("api");
   const [tlsCert, setTlsCert] = useState<string>("");
   const [tlsKey, setTlsKey] = useState<string>("");
 
@@ -313,6 +315,10 @@ export default function SettingsAccessIndexRoute() {
                   }}
                 />
               </SettingsItem>
+            )}
+
+            {apiCapability && (
+              <ApiTokenSettings passwordMode={loaderData.authMode === "password"} />
             )}
           </div>
           <div className="h-px w-full bg-slate-800/10 dark:bg-slate-300/20" />

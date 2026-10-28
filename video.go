@@ -13,6 +13,9 @@ var (
 	lastVideoState       native.VideoState
 	videoSleepModeCtx    context.Context
 	videoSleepModeCancel context.CancelFunc
+	// videoSleepModeLock guards the ticker, which sessions and the video
+	// lease start and stop from different goroutines.
+	videoSleepModeLock sync.Mutex
 )
 
 const (
@@ -60,7 +63,7 @@ func isHostDisplayAdvertised() bool {
 }
 
 func shouldAdvertiseHostDisplayLocked() bool {
-	return !config.HideDisplayWhenIdle || getActiveSessions() > 0
+	return !config.HideDisplayWhenIdle || getActiveSessions() > 0 || videoLeaseActive.Load()
 }
 
 func setHostDisplayAdvertised(enabled bool, reason string, force bool) error {
@@ -140,6 +143,12 @@ func rpcSetVideoSleepMode(duration int) error {
 }
 
 func stopVideoSleepModeTicker() {
+	videoSleepModeLock.Lock()
+	defer videoSleepModeLock.Unlock()
+	stopVideoSleepModeTickerLocked()
+}
+
+func stopVideoSleepModeTickerLocked() {
 	nativeLogger.Trace().Msg("stopping HDMI sleep mode ticker")
 
 	if videoSleepModeCancel != nil {
@@ -166,8 +175,11 @@ func startVideoSleepModeTicker() {
 		return
 	}
 
+	videoSleepModeLock.Lock()
+	defer videoSleepModeLock.Unlock()
+
 	// Stop any existing timer and goroutine
-	stopVideoSleepModeTicker()
+	stopVideoSleepModeTickerLocked()
 
 	// Create new context for this ticker
 	videoSleepModeCtx, videoSleepModeCancel = context.WithCancel(context.Background())
@@ -184,8 +196,8 @@ func doVideoSleepModeTicker(ctx context.Context, duration time.Duration) {
 	for {
 		select {
 		case <-timer.C:
-			if getActiveSessions() > 0 {
-				nativeLogger.Warn().Msg("not going to enter HDMI sleep mode because there are active sessions")
+			if getActiveSessions() > 0 || videoLeaseActive.Load() {
+				nativeLogger.Warn().Msg("not going to enter HDMI sleep mode because there are active sessions or a video lease")
 				continue
 			}
 

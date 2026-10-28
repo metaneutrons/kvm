@@ -189,6 +189,15 @@ func Main() {
 
 	logger.Log().Msg("JetKVM Shutting Down")
 
+	// Give the watchdog goroutine the chance to disarm the watchdog; returning
+	// from main ends the process before it runs, and the kernel then warns that
+	// the watchdog did not stop.
+	cancel()
+	select {
+	case <-watchdogDone:
+	case <-time.After(time.Second):
+	}
+
 	//if fuseServer != nil {
 	//	err := setMassStorageImage(" ")
 	//	if err != nil {
