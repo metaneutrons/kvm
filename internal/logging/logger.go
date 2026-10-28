@@ -82,6 +82,8 @@ var (
 	subsystemDefaultLevels = map[string]zerolog.Level{
 		"diagnostics": zerolog.InfoLevel,
 		"supervisor":  zerolog.InfoLevel,
+		// what scripts and AI agents did through the API
+		"api": zerolog.InfoLevel,
 	}
 )
 

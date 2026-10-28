@@ -212,7 +212,21 @@ func setupRouter() *gin.Engine {
 
 		protected.POST("/device/send-wol/:mac-addr", handleSendWOLMagicPacket)
 
+		protected.GET("/auth/api-tokens", handleListAPITokens)
+		protected.POST("/auth/api-tokens", handleCreateAPIToken)
+		protected.DELETE("/auth/api-tokens/:id", handleDeleteAPIToken)
+
 		protected.GET("/diagnostics", handleDiagnosticsDownload)
+	}
+
+	// API routes for scripts and agents (login cookie, API token or password)
+	api := r.Group("/api")
+	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
+	{
+		api.POST("/rpc", handleAPIRPC)
+		// Uploads start with the startStorageFileUpload RPC, which returns the
+		// uploadId for this request.
+		api.POST("/storage/upload", requirePerm(permMedia), handleUploadHttp)
 	}
 
 	// Catch-all route for SPA
