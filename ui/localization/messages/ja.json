@@ -57,6 +57,8 @@
     "access_learn_security": "クラウドセキュリティについて学ぶ",
     "access_local_description": "デバイスへのローカルアクセスモードを管理します",
     "access_local_title": "ローカル",
+    "access_mcp_description": "AIエージェントが/api/mcpのModel Context Protocol経由でデバイスを操作できるようにします。オフにしても、スクリプト用のAPIは引き続き使用できます。",
+    "access_mcp_title": "MCPサーバー",
     "access_no_device_id": "デバイスIDがありません",
     "access_private_key_description": "セキュリティ上の理由から、保存後は表示されません。",
     "access_private_key_label": "秘密鍵",

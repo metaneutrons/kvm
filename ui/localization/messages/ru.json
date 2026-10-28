@@ -57,6 +57,8 @@
     "access_learn_security": "Подробнее о нашей облачной безопасности",
     "access_local_description": "Управление режимом локального доступа к устройству",
     "access_local_title": "Локальный",
+    "access_mcp_description": "Позволяет ИИ-агентам управлять устройством через Model Context Protocol по адресу /api/mcp. API для скриптов остаётся доступным, когда эта функция отключена.",
+    "access_mcp_title": "MCP-сервер",
     "access_no_device_id": "ID устройства недоступен",
     "access_private_key_description": "В целях безопасности не будет отображаться после сохранения.",
     "access_private_key_label": "Приватный ключ",

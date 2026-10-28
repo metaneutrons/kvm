@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Input from the API reaches the host while someone may
+// Input from the API and the MCP server reaches the host while someone may
 // be watching in the web UI. Every action is logged, and the UI is told while
 // an agent is active, so a person at the device can see where input comes
 // from.
@@ -71,6 +71,12 @@ func noteAgentAction(ctx context.Context, source, action, detail string) {
 	if notify {
 		sendAgentActivity(agentActivityEvent{Active: true, Source: source, Action: action, Token: token})
 	}
+}
+
+// noteAgentView logs that an agent looked at the screen or read state. It
+// sends no input, so the UI is not told.
+func noteAgentView(ctx context.Context, source, action string) {
+	apiLogger.Info().Str("source", source).Str("action", action).Str("token", apiTokenName(ctx)).Msg("agent view")
 }
 
 // apiTokenName returns the name of the token behind a request, or "" for the

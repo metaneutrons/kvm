@@ -101,6 +101,7 @@ type Config struct {
 	HashedPassword       string               `json:"hashed_password"`
 	LocalAuthToken       string               `json:"local_auth_token"`
 	APITokens            []APIToken           `json:"api_tokens,omitempty"`
+	MCPDisabled          bool                 `json:"mcp_disabled,omitempty"`
 	APITokenHash         string               `json:"api_token_hash,omitempty"`       // legacy, moved into APITokens on load
 	APITokenCreatedAt    string               `json:"api_token_created_at,omitempty"` // legacy
 	APITokenScope        string               `json:"api_token_scope,omitempty"`      // legacy

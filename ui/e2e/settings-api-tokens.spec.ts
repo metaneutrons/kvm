@@ -7,7 +7,9 @@ import {
   bearer,
   deleteTestTokens,
   ensureLocalAuthMode,
+  listApiTokens,
   openAccessSettings,
+  setMcpEnabled,
 } from "./helpers";
 
 const NAME = `${TEST_TOKEN_PREFIX}settings`;
@@ -18,10 +20,12 @@ test.describe("API token settings", () => {
 
   test.beforeEach(async ({ page }) => {
     await ensureLocalAuthMode(page, { mode: "password", password: API_TEST_PASSWORD });
+    await setMcpEnabled(page, true);
     await openAccessSettings(page);
   });
 
   test.afterEach(async ({ page }) => {
+    await setMcpEnabled(page, true);
     await deleteTestTokens(page);
   });
 
@@ -57,6 +61,25 @@ test.describe("API token settings", () => {
     await expect(row).toHaveCount(0);
     expect((await apiRpc(bearer(token), "ping")).status).toBe(401);
   });
+
+  test("turns the MCP server off and on", async ({ page }) => {
+    const mcp = page.locator("label", { hasText: "MCP Server" }).getByRole("checkbox");
+    await expect(mcp).toBeChecked();
+
+    await mcp.click();
+    await expect(mcp).not.toBeChecked();
+    await expect.poll(async () => (await listApiTokens(page)).mcp_enabled).toBe(false);
+
+    await page.reload();
+    await expect(
+      page.locator("label", { hasText: "MCP Server" }).getByRole("checkbox"),
+    ).not.toBeChecked();
+
+    const again = page.locator("label", { hasText: "MCP Server" }).getByRole("checkbox");
+    await again.click();
+    await expect(again).toBeChecked();
+    await expect.poll(async () => (await listApiTokens(page)).mcp_enabled).toBe(true);
+  });
 });
 
 test.describe("API token settings without a password", () => {
@@ -69,11 +92,12 @@ test.describe("API token settings without a password", () => {
     await page.close();
   });
 
-  test("has no tokens", async ({ page }) => {
+  test("keeps the MCP switch but has no tokens", async ({ page }) => {
     await ensureLocalAuthMode(page, { mode: "noPassword" });
     await page.goto("/settings/access");
     await expect(page.locator("text=Authentication Mode")).toBeVisible({ timeout: 15000 });
 
+    await expect(page.locator("label", { hasText: "MCP Server" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Create Token" })).toHaveCount(0);
     await expect(page.getByText("API Tokens", { exact: true })).toHaveCount(0);
   });

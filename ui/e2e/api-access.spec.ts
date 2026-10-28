@@ -11,7 +11,9 @@ import {
   deleteTestTokens,
   deviceUrl,
   ensureLocalAuthMode,
+  jpegSize,
   listApiTokens,
+  takeSnapshot,
 } from "./helpers";
 
 // Failed credentials count against the login rate limit of the test machine's
@@ -55,7 +57,7 @@ test.describe("API access", () => {
     for (const [method, path] of [
       ["GET", "/auth/api-tokens"],
       ["POST", "/auth/api-tokens"],
-      ["DELETE", "/auth/api-tokens/none"],
+      ["PUT", "/auth/mcp"],
       ["GET", "/device"],
     ]) {
       const res = await fetch(deviceUrl(path), { method, headers: bearer(token) });
@@ -187,6 +189,59 @@ test.describe("API access", () => {
     }
     expect((await apiRpc(basicAuth(`${API_TEST_PASSWORD}-wrong`), "ping")).status).toBe(401);
   });
+
+  test("serves a snapshot to a token, the password and a logged-in browser", async ({ page }) => {
+    const { token } = await createApiToken(page, { name: `${TEST_TOKEN_PREFIX}view` });
+
+    const unauthorized = await fetch(deviceUrl("/api/video/snapshot"));
+    expect(unauthorized.status).toBe(401);
+
+    for (const [who, headers] of [
+      ["a token", bearer(token)],
+      ["the password", basicAuth(API_TEST_PASSWORD)],
+    ] as const) {
+      const res = await takeSnapshot(headers);
+      expect(res.status, who).toBe(200);
+      expect(res.headers.get("content-type")).toBe("image/jpeg");
+      const data = new Uint8Array(await res.arrayBuffer());
+      expect(data.byteLength, who).toBeGreaterThan(1000);
+      const { width, height } = jpegSize(data);
+      expect(width).toBeGreaterThan(100);
+      expect(height).toBeGreaterThan(100);
+    }
+
+    const viaBrowser = await page.request.get("/api/video/snapshot");
+    expect([200, 503]).toContain(viaBrowser.status());
+  });
+
+  test("scales and crops a snapshot", async ({ page }) => {
+    const { token } = await createApiToken(page, { name: `${TEST_TOKEN_PREFIX}view` });
+    const auth = bearer(token);
+
+    const scaled = await takeSnapshot(auth, "?width=320");
+    expect(scaled.status).toBe(200);
+    expect(jpegSize(new Uint8Array(await scaled.arrayBuffer())).width).toBe(320);
+
+    const cropped = await takeSnapshot(auth, "?x=0&y=0&w=320&h=192");
+    expect(cropped.status).toBe(200);
+    const { width, height } = jpegSize(new Uint8Array(await cropped.arrayBuffer()));
+    expect(width / height).toBeCloseTo(320 / 192, 1);
+    expect(width).toBeLessThanOrEqual(320);
+
+    const small = await takeSnapshot(auth, "?quality=10");
+    const large = await takeSnapshot(auth, "?quality=95");
+    expect((await large.arrayBuffer()).byteLength).toBeGreaterThan(
+      (await small.arrayBuffer()).byteLength,
+    );
+  });
+
+  test("rejects invalid snapshot parameters", async ({ page }) => {
+    const { token } = await createApiToken(page, { name: `${TEST_TOKEN_PREFIX}view` });
+    for (const query of ["?quality=0", "?quality=100", "?w=320", "?h=320", "?width=5", "?x=abc"]) {
+      const res = await fetch(deviceUrl(`/api/video/snapshot${query}`), { headers: bearer(token) });
+      expect(res.status, query).toBe(400);
+    }
+  });
 });
 
 test.describe("API access without a password", () => {
@@ -205,5 +260,9 @@ test.describe("API access without a password", () => {
     const rpc = await apiRpc({}, "ping");
     expect(rpc.status).toBe(200);
     expect(rpc.result).toBe("pong");
+
+    const res = await takeSnapshot({});
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/jpeg");
   });
 });

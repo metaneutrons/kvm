@@ -3,7 +3,7 @@ import { LuCopy } from "react-icons/lu";
 
 import { Button } from "@components/Button";
 import { GridCard } from "@components/Card";
-import { CheckboxWithLabel } from "@components/Checkbox";
+import { Checkbox, CheckboxWithLabel } from "@components/Checkbox";
 import { InputFieldWithLabel } from "@components/InputField";
 import { NestedSettingsGroup } from "@components/NestedSettingsGroup";
 import { SelectMenuBasic } from "@components/SelectMenuBasic";
@@ -31,6 +31,7 @@ interface ApiTokenInfo {
 interface ApiTokenList {
   tokens: ApiTokenInfo[];
   limit: number;
+  mcp_enabled: boolean;
 }
 
 const EXPIRY_DAYS = [0, 7, 30, 90, 365];
@@ -129,7 +130,7 @@ function TokenRow({
 
 // The device returns a new token only once, in the response that creates it.
 // It is kept in component state until the page is left and never stored.
-export default function ApiTokenSettings() {
+export default function ApiTokenSettings({ passwordMode }: { passwordMode: boolean }) {
   const [list, setList] = useState<ApiTokenList | null>(null);
   const [newToken, setNewToken] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
@@ -192,6 +193,21 @@ export default function ApiTokenSettings() {
     }
   };
 
+  const setMcpEnabled = async (enabled: boolean) => {
+    // The switch follows the click at once and goes back if the device refuses.
+    setList(current => current && { ...current, mcp_enabled: enabled });
+    setIsBusy(true);
+    try {
+      const res = await api.PUT(`${DEVICE_API}/auth/mcp`, { enabled });
+      if (!res.ok) {
+        await fail(res);
+      }
+      await loadTokens();
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   const togglePermission = (permission: OptionalPermission, checked: boolean) =>
     setPermissions(current =>
       checked ? [...current, permission] : current.filter(p => p !== permission),
@@ -203,113 +219,125 @@ export default function ApiTokenSettings() {
 
   return (
     <>
-      <SettingsItem
-        title={m.access_api_token_title()}
-        description={m.access_api_token_description()}
-      />
+      <SettingsItem title={m.access_mcp_title()} description={m.access_mcp_description()}>
+        <Checkbox
+          checked={list.mcp_enabled}
+          disabled={isBusy}
+          onChange={e => setMcpEnabled(e.target.checked)}
+        />
+      </SettingsItem>
 
-      {list.tokens.length > 0 && (
-        <NestedSettingsGroup>
-          <div className="divide-y divide-slate-800/10 dark:divide-slate-300/20">
-            {list.tokens.map(token => (
-              <TokenRow key={token.id} token={token} disabled={isBusy} onDelete={deleteToken} />
-            ))}
-          </div>
-        </NestedSettingsGroup>
-      )}
-
-      {newToken && (
-        <NestedSettingsGroup>
+      {passwordMode && (
+        <>
           <SettingsItem
-            title={m.access_api_token_new_title()}
-            description={m.access_api_token_new_description()}
+            title={m.access_api_token_title()}
+            description={m.access_api_token_description()}
           />
-          <div className="flex items-center">
-            <GridCard cardClassName="rounded-r-none min-w-0">
-              <div className="flex h-[34px] items-center overflow-x-auto px-3 font-mono text-xs whitespace-nowrap text-black select-all dark:text-white">
-                {newToken}
-              </div>
-            </GridCard>
-            <Button
-              className="rounded-l-none border-l-slate-800/30 dark:border-slate-300/20"
-              size="SM"
-              type="button"
-              theme="light"
-              LeadingIcon={LuCopy}
-              onClick={async () => {
-                if (await copy(newToken)) {
-                  notifications.success(m.access_api_token_copied());
-                } else {
-                  notifications.error(m.access_api_token_copy_error());
-                }
-              }}
-            />
-          </div>
-        </NestedSettingsGroup>
-      )}
 
-      {!atLimit && (
-        <NestedSettingsGroup>
-          <form
-            className="space-y-4"
-            onSubmit={e => {
-              e.preventDefault();
-              createToken();
-            }}
-          >
-            <InputFieldWithLabel
-              id="api-token-name"
-              label={m.access_api_token_name_label()}
-              placeholder={m.access_api_token_name_placeholder()}
-              maxLength={40}
-              value={name}
-              disabled={isBusy}
-              onChange={e => setName(e.target.value)}
-            />
-            <div className="space-y-2">
-              <CheckboxWithLabel
-                label={permissionLabel("view")}
-                description={permissionDescription("view")}
-                checked
-                disabled
-                readOnly
+          {list.tokens.length > 0 && (
+            <NestedSettingsGroup>
+              <div className="divide-y divide-slate-800/10 dark:divide-slate-300/20">
+                {list.tokens.map(token => (
+                  <TokenRow key={token.id} token={token} disabled={isBusy} onDelete={deleteToken} />
+                ))}
+              </div>
+            </NestedSettingsGroup>
+          )}
+
+          {newToken && (
+            <NestedSettingsGroup>
+              <SettingsItem
+                title={m.access_api_token_new_title()}
+                description={m.access_api_token_new_description()}
               />
-              {(["input", "media", "power"] as const).map(permission => (
-                <CheckboxWithLabel
-                  key={permission}
-                  label={permissionLabel(permission)}
-                  description={permissionDescription(permission)}
-                  checked={permissions.includes(permission)}
-                  disabled={isBusy}
-                  onChange={e => togglePermission(permission, e.target.checked)}
+              <div className="flex items-center">
+                <GridCard cardClassName="rounded-r-none min-w-0">
+                  <div className="flex h-[34px] items-center overflow-x-auto px-3 font-mono text-xs whitespace-nowrap text-black select-all dark:text-white">
+                    {newToken}
+                  </div>
+                </GridCard>
+                <Button
+                  className="rounded-l-none border-l-slate-800/30 dark:border-slate-300/20"
+                  size="SM"
+                  type="button"
+                  theme="light"
+                  LeadingIcon={LuCopy}
+                  onClick={async () => {
+                    if (await copy(newToken)) {
+                      notifications.success(m.access_api_token_copied());
+                    } else {
+                      notifications.error(m.access_api_token_copy_error());
+                    }
+                  }}
                 />
-              ))}
-            </div>
-            <div className="flex flex-wrap items-end justify-between gap-2">
-              <SelectMenuBasic
-                size="SM"
-                label={m.access_api_token_expiry_label()}
-                value={days}
-                disabled={isBusy}
-                onChange={e => setDays(e.target.value)}
-                options={EXPIRY_DAYS.map(d => ({
-                  value: String(d),
-                  label:
-                    d === 0
-                      ? m.access_api_token_expiry_never()
-                      : m.access_api_token_expiry_days({ days: d }),
-                }))}
-              />
-              <Button
-                size="SM"
-                theme="light"
-                type="submit"
-                text={m.access_api_token_create()}
-                disabled={isBusy || name.trim() === ""}
-              />
-            </div>
-          </form>
-        </NestedSettingsGroup>
+              </div>
+            </NestedSettingsGroup>
+          )}
+
+          {!atLimit && (
+            <NestedSettingsGroup>
+              <form
+                className="space-y-4"
+                onSubmit={e => {
+                  e.preventDefault();
+                  createToken();
+                }}
+              >
+                <InputFieldWithLabel
+                  id="api-token-name"
+                  label={m.access_api_token_name_label()}
+                  placeholder={m.access_api_token_name_placeholder()}
+                  maxLength={40}
+                  value={name}
+                  disabled={isBusy}
+                  onChange={e => setName(e.target.value)}
+                />
+                <div className="space-y-2">
+                  <CheckboxWithLabel
+                    label={permissionLabel("view")}
+                    description={permissionDescription("view")}
+                    checked
+                    disabled
+                    readOnly
+                  />
+                  {(["input", "media", "power"] as const).map(permission => (
+                    <CheckboxWithLabel
+                      key={permission}
+                      label={permissionLabel(permission)}
+                      description={permissionDescription(permission)}
+                      checked={permissions.includes(permission)}
+                      disabled={isBusy}
+                      onChange={e => togglePermission(permission, e.target.checked)}
+                    />
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-end justify-between gap-2">
+                  <SelectMenuBasic
+                    size="SM"
+                    label={m.access_api_token_expiry_label()}
+                    value={days}
+                    disabled={isBusy}
+                    onChange={e => setDays(e.target.value)}
+                    options={EXPIRY_DAYS.map(d => ({
+                      value: String(d),
+                      label:
+                        d === 0
+                          ? m.access_api_token_expiry_never()
+                          : m.access_api_token_expiry_days({ days: d }),
+                    }))}
+                  />
+                  <Button
+                    size="SM"
+                    theme="light"
+                    type="submit"
+                    text={m.access_api_token_create()}
+                    disabled={isBusy || name.trim() === ""}
+                  />
+                </div>
+              </form>
+            </NestedSettingsGroup>
+          )}
+        </>
       )}
     </>
   );

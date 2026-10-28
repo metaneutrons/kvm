@@ -57,6 +57,8 @@
     "access_learn_security": "了解我们的云安全机制",
     "access_local_description": "管理设备的本地访问模式。",
     "access_local_title": "本地",
+    "access_mcp_description": "允许 AI 代理通过 /api/mcp 的 Model Context Protocol 控制设备。关闭后，脚本用的 API 仍可使用。",
+    "access_mcp_title": "MCP 服务器",
     "access_no_device_id": "无可用设备 ID",
     "access_private_key_description": "出于安全考虑，私钥保存后将不再显示。",
     "access_private_key_label": "私钥",

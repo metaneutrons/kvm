@@ -57,6 +57,8 @@
     "access_learn_security": "Lær om vores cloud-sikkerhed",
     "access_local_description": "Administrer tilstanden for lokal adgang til enheden",
     "access_local_title": "Lokal",
+    "access_mcp_description": "Lader AI-agenter styre enheden via Model Context Protocol på /api/mcp. API'et til scripts forbliver tilgængeligt, når dette er slået fra.",
+    "access_mcp_title": "MCP-server",
     "access_no_device_id": "Intet enheds-ID tilgængeligt",
     "access_private_key_description": "Af sikkerhedsmæssige årsager vil den ikke blive vist efter lagring.",
     "access_private_key_label": "Privat nøgle",

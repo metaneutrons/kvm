@@ -57,6 +57,8 @@
     "access_learn_security": "Learn about our cloud security",
     "access_local_description": "Manage the mode of local access to the device",
     "access_local_title": "Local",
+    "access_mcp_description": "Lets AI agents control the device through the Model Context Protocol at /api/mcp. The API for scripts stays available when this is off.",
+    "access_mcp_title": "MCP Server",
     "access_no_device_id": "No device ID available",
     "access_private_key_description": "For security reasons, it will not be displayed after saving.",
     "access_private_key_label": "Private Key",

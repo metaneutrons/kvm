@@ -57,6 +57,8 @@
     "access_learn_security": "Dysgwch am ein diogelwch cwmwl",
     "access_local_description": "Rheoli modd mynediad lleol i'r ddyfais",
     "access_local_title": "Lleol",
+    "access_mcp_description": "Yn gadael i asiantau AI reoli'r ddyfais trwy'r Model Context Protocol yn /api/mcp. Mae'r API ar gyfer sgriptiau yn parhau ar gael pan fydd hwn wedi'i ddiffodd.",
+    "access_mcp_title": "Gweinydd MCP",
     "access_no_device_id": "Dim ID dyfais ar gael",
     "access_private_key_description": "Am resymau diogelwch, ni fydd yn cael ei arddangos ar ôl cadw.",
     "access_private_key_label": "Allwedd Breifat",

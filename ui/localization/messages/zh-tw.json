@@ -57,6 +57,8 @@
     "access_learn_security": "了解我們的雲端安全性",
     "access_local_description": "管理裝置的本機存取模式",
     "access_local_title": "本機",
+    "access_mcp_description": "允許 AI 代理程式透過 /api/mcp 的 Model Context Protocol 控制裝置。關閉此選項後，指令碼用的 API 仍可使用。",
+    "access_mcp_title": "MCP 伺服器",
     "access_no_device_id": "無可用裝置 ID",
     "access_private_key_description": "基於安全考量，儲存後將不再顯示。",
     "access_private_key_label": "私鑰",

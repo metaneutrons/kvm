@@ -57,6 +57,8 @@
     "access_learn_security": "Lær om vår skysikkerhet",
     "access_local_description": "Administrer modusen for lokal tilgang til enheten",
     "access_local_title": "Lokalt",
+    "access_mcp_description": "Lar KI-agenter styre enheten via Model Context Protocol på /api/mcp. API-et for skript er fortsatt tilgjengelig når dette er slått av.",
+    "access_mcp_title": "MCP-server",
     "access_no_device_id": "Ingen enhets-ID tilgjengelig",
     "access_private_key_description": "Av sikkerhetshensyn vil den ikke vises etter lagring.",
     "access_private_key_label": "Privat nøkkel",

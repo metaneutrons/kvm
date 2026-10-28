@@ -242,7 +242,7 @@ func handleListAPITokens(c *gin.Context) {
 	for _, t := range tokens {
 		infos = append(infos, apiTokenInfoOf(t, now))
 	}
-	c.JSON(http.StatusOK, gin.H{"tokens": infos, "limit": apiTokenLimit})
+	c.JSON(http.StatusOK, gin.H{"tokens": infos, "limit": apiTokenLimit, "mcp_enabled": !config.MCPDisabled})
 }
 
 // handleCreateAPIToken adds a token. The token itself is only returned here
@@ -299,6 +299,29 @@ func handleDeleteAPIToken(c *gin.Context) {
 	forgetAPITokenUse(id)
 	logger.Info().Str("ip", c.ClientIP()).Str("token", name).Msg("API token deleted")
 	c.JSON(http.StatusOK, gin.H{"message": "API token deleted"})
+}
+
+// handleSetMCPEnabled switches the MCP server on or off. The API stays as it
+// is, so scripts keep working.
+func handleSetMCPEnabled(c *gin.Context) {
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	prev := config.MCPDisabled
+	config.MCPDisabled = !*req.Enabled
+	if err := SaveConfig(); err != nil {
+		config.MCPDisabled = prev
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save configuration"})
+		return
+	}
+
+	logger.Info().Str("ip", c.ClientIP()).Bool("enabled", *req.Enabled).Msg("MCP server switched")
+	c.JSON(http.StatusOK, gin.H{"mcp_enabled": *req.Enabled})
 }
 
 func respondAPITokenError(c *gin.Context, err error) {

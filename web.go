@@ -222,19 +222,22 @@ func setupRouter() *gin.Engine {
 		protected.GET("/auth/api-tokens", handleListAPITokens)
 		protected.POST("/auth/api-tokens", handleCreateAPIToken)
 		protected.DELETE("/auth/api-tokens/:id", handleDeleteAPIToken)
+		protected.PUT("/auth/mcp", handleSetMCPEnabled)
 
-		protected.GET("/video/snapshot", handleVideoSnapshot)
 		protected.GET("/diagnostics", handleDiagnosticsDownload)
 	}
 
-	// API routes for scripts and agents (login cookie, API token or password)
+	// API routes for scripts and agents (login cookie or API token)
 	api := r.Group("/api")
 	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
 	{
+		api.GET("/video/snapshot", handleVideoSnapshot)
 		api.POST("/rpc", handleAPIRPC)
 		// Uploads start with the startStorageFileUpload RPC, which returns the
 		// uploadId for this request.
 		api.POST("/storage/upload", requirePerm(permMedia), handleUploadHttp)
+		// In stateless mode the MCP handler answers GET and DELETE itself.
+		api.Any("/mcp", handleMCP)
 	}
 
 	// Catch-all route for SPA

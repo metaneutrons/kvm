@@ -57,6 +57,8 @@
     "access_learn_security": "Bulut güvenliğimiz hakkında bilgi edinin",
     "access_local_description": "Cihaza yerel erişim modunu yönetin",
     "access_local_title": "Yerel",
+    "access_mcp_description": "Yapay zekâ ajanlarının cihazı /api/mcp adresindeki Model Context Protocol üzerinden denetlemesini sağlar. Bu kapalıyken betikler için API kullanılabilir kalır.",
+    "access_mcp_title": "MCP Sunucusu",
     "access_no_device_id": "Kullanılabilir cihaz kimliği yok",
     "access_private_key_description": "Güvenlik nedeniyle kaydedildikten sonra tekrar gösterilmeyecektir.",
     "access_private_key_label": "Özel Anahtar",
