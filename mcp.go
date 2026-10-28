@@ -182,7 +182,10 @@ func trackMCP[In, Out any](screen mcpScreen, name string, handler mcp.ToolHandle
 		if err != nil || result == nil || !ok || !after.wantsScreenshot() {
 			return result, out, err
 		}
-		waitForScreen(ctx, waitUntilStable, mcpSettleWait)
+		if _, waitErr := waitForScreen(ctx, waitUntilStable, mcpSettleWait); waitErr != nil {
+			result.Content = append(result.Content, &mcp.TextContent{Text: "No screenshot: " + waitErr.Error()})
+			return result, out, err
+		}
 		shot, shotErr := screen.capture(0, nil)
 		if shotErr != nil {
 			result.Content = append(result.Content, &mcp.TextContent{Text: "No screenshot: " + shotErr.Error()})
