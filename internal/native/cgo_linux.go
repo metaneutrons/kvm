@@ -8,6 +8,7 @@ package native
 import (
 	"fmt"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/rs/zerolog"
@@ -427,6 +428,39 @@ func videoSetEDID(edid string) error {
 		return fmt.Errorf("failed to set EDID: %d", ret)
 	}
 	return nil
+}
+
+func videoSnapshotJPEG(opts SnapshotOptions, timeout time.Duration) ([]byte, error) {
+	// No cgoLock here: video_snapshot_jpeg synchronises with the capture thread on its
+	// own and blocks until the next frame is encoded, which must not stall other calls.
+	params := C.jetkvm_snapshot_params_t{
+		quality:     C.int(opts.Quality),
+		crop_x:      C.int(opts.CropX),
+		crop_y:      C.int(opts.CropY),
+		crop_width:  C.int(opts.CropWidth),
+		crop_height: C.int(opts.CropHeight),
+		out_width:   C.int(opts.Width),
+		out_height:  C.int(opts.Height),
+	}
+	var data *C.uint8_t
+	var length C.size_t
+	ret := C.jetkvm_video_snapshot_jpeg(&params, C.int(timeout.Milliseconds()), &data, &length)
+	if data != nil {
+		defer C.free(unsafe.Pointer(data))
+	}
+
+	switch ret {
+	case 0:
+		return C.GoBytes(unsafe.Pointer(data), C.int(length)), nil
+	case C.VIDEO_SNAPSHOT_ERR_NOT_STREAMING:
+		return nil, ErrVideoNotStreaming
+	case C.VIDEO_SNAPSHOT_ERR_TIMEOUT:
+		return nil, ErrSnapshotTimeout
+	case C.VIDEO_SNAPSHOT_ERR_INVALID:
+		return nil, ErrSnapshotInvalid
+	default:
+		return nil, fmt.Errorf("failed to encode snapshot: %d", ret)
+	}
 }
 
 // DO NOT USE THIS FUNCTION IN PRODUCTION

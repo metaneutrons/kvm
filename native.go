@@ -35,6 +35,7 @@ func initNative(systemVersion *semver.Version, appVersion *semver.Version) {
 		OnNativeRestart: func() {
 			configureDisplayOnNativeRestart()
 			_ = reapplyHostDisplayAdvertisement("native_restarted")
+			markVideoPipelineStopped()
 		},
 		OnVideoStateChange: func(state native.VideoState) {
 			lastVideoState = state

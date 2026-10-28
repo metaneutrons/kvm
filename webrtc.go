@@ -696,16 +696,19 @@ func startNativeVideoLocked(session *Session) {
 	if videoPausedBy != nil {
 		return
 	}
-	_ = nativeInstance.VideoSetCodecType(sessionVideoCodecType(session))
-	_ = nativeInstance.VideoStart()
+	startVideoPipelineLocked(sessionVideoCodecType(session))
 }
 
 // stopNativeVideo stops the pipeline under the pause lock so it cannot
-// interleave with a resume that is starting it.
+// interleave with a resume that is starting it. An active video lease keeps
+// the pipeline running; it stops when the lease expires.
 func stopNativeVideo() {
 	videoPauseMu.Lock()
 	defer videoPauseMu.Unlock()
-	_ = nativeInstance.VideoStop()
+	if videoLeaseActive.Load() {
+		return
+	}
+	_ = stopVideoPipelineLocked()
 }
 
 // releaseVideoPause drops a pause held by a closing session and restarts video
