@@ -194,12 +194,13 @@ export default function ApiTokenSettings({ passwordMode }: { passwordMode: boole
   };
 
   const setMcpEnabled = async (enabled: boolean) => {
+    // The switch follows the click at once and goes back if the device refuses.
+    setList(current => current && { ...current, mcp_enabled: enabled });
     setIsBusy(true);
     try {
       const res = await api.PUT(`${DEVICE_API}/auth/mcp`, { enabled });
       if (!res.ok) {
         await fail(res);
-        return;
       }
       await loadTokens();
     } finally {
@@ -283,6 +284,7 @@ export default function ApiTokenSettings({ passwordMode }: { passwordMode: boole
                 }}
               >
                 <InputFieldWithLabel
+                  id="api-token-name"
                   label={m.access_api_token_name_label()}
                   placeholder={m.access_api_token_name_placeholder()}
                   maxLength={40}

@@ -33,7 +33,7 @@ test.describe("API token settings", () => {
     const create = page.getByRole("button", { name: "Create Token" });
     // A token needs a name.
     await expect(create).toBeDisabled();
-    await page.getByLabel("Name", { exact: true }).fill(NAME);
+    await page.getByPlaceholder("e.g. Home Assistant").fill(NAME);
     await expect(create).toBeEnabled();
 
     // View is always part of a token and cannot be turned off.
@@ -66,7 +66,8 @@ test.describe("API token settings", () => {
     const mcp = page.locator("label", { hasText: "MCP Server" }).getByRole("checkbox");
     await expect(mcp).toBeChecked();
 
-    await mcp.uncheck();
+    await mcp.click();
+    await expect(mcp).not.toBeChecked();
     await expect.poll(async () => (await listApiTokens(page)).mcp_enabled).toBe(false);
 
     await page.reload();
@@ -74,7 +75,9 @@ test.describe("API token settings", () => {
       page.locator("label", { hasText: "MCP Server" }).getByRole("checkbox"),
     ).not.toBeChecked();
 
-    await page.locator("label", { hasText: "MCP Server" }).getByRole("checkbox").check();
+    const again = page.locator("label", { hasText: "MCP Server" }).getByRole("checkbox");
+    await again.click();
+    await expect(again).toBeChecked();
     await expect.poll(async () => (await listApiTokens(page)).mcp_enabled).toBe(true);
   });
 });
