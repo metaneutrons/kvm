@@ -786,6 +786,9 @@ func stopNativeVideo() {
 func releaseVideoPause(session *Session) {
 	videoPauseMu.Lock()
 	defer videoPauseMu.Unlock()
+	if videoLeaseTookPauseFrom == session {
+		videoLeaseTookPauseFrom = nil
+	}
 	if videoPausedBy != session {
 		return
 	}
