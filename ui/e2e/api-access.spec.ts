@@ -100,6 +100,50 @@ test.describe("API access", () => {
     }
   });
 
+  test("the display permission lets a token set the EDID", async ({ page }) => {
+    const view = await createApiToken(page, { name: `${TEST_TOKEN_PREFIX}view` });
+    const display = await createApiToken(page, {
+      name: `${TEST_TOKEN_PREFIX}display`,
+      permissions: ["display"],
+    });
+    expect(display.info.permissions).toEqual(["view", "display"]);
+
+    // Reading the EDID is open to every token.
+    const current = await apiRpc(bearer(view.token), "getEDID");
+    expect(current.status).toBe(200);
+    expect(typeof current.result).toBe("string");
+    const edid = current.result as string;
+
+    expect((await apiRpc(bearer(view.token), "setEDID", { edid })).error?.code).toBe(NO_PERMISSION);
+
+    // The same EDID goes back in, so the host sees no other monitor.
+    const set = await apiRpc(bearer(display.token), "setEDID", { edid });
+    expect(set.status).toBe(200);
+    expect(set.error).toBeUndefined();
+    expect(((await apiRpc(bearer(view.token), "getEDID")).result as string).toLowerCase()).toBe(
+      edid.toLowerCase(),
+    );
+  });
+
+  test("the login cookie does not open the RPC, MCP and upload endpoints", async ({ page }) => {
+    // page carries the login cookie, and its requests have no foreign origin.
+    const rpc = await page.request.post("/api/rpc", { data: PING });
+    expect(rpc.status()).toBe(401);
+
+    const mcp = await page.request.post("/api/mcp", {
+      headers: { Accept: "application/json, text/event-stream" },
+      data: { jsonrpc: "2.0", method: "tools/list", id: 1 },
+    });
+    expect(mcp.status()).toBe(401);
+
+    const upload = await page.request.post("/api/storage/upload?uploadId=none");
+    expect(upload.status()).toBe(401);
+
+    // The same page does pass with a token, so the 401 is about the cookie.
+    const { token } = await createApiToken(page, { name: `${TEST_TOKEN_PREFIX}view` });
+    expect((await apiRpc(bearer(token), "ping")).status).toBe(200);
+  });
+
   test("an upload needs the media permission", async ({ page }) => {
     const view = await createApiToken(page, { name: `${TEST_TOKEN_PREFIX}view` });
     const media = await createApiToken(page, {
