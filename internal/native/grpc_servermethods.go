@@ -85,17 +85,6 @@ func (s *grpcServer) VideoLogStatus(ctx context.Context, req *pb.Empty) (*pb.Vid
 	return &pb.VideoLogStatusResponse{Status: logStatus}, nil
 }
 
-func (s *grpcServer) VideoGetSnapshot(ctx context.Context, req *pb.Empty) (*pb.VideoGetSnapshotResponse, error) {
-	jpeg, err := s.native.VideoGetSnapshot()
-	if err != nil {
-		if errors.Is(err, ErrVideoNotStreaming) {
-			return nil, status.Error(codes.FailedPrecondition, err.Error())
-		}
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	return &pb.VideoGetSnapshotResponse{Jpeg: jpeg}, nil
-}
-
 func (s *grpcServer) VideoStop(ctx context.Context, req *pb.Empty) (*pb.Empty, error) {
 	if err := s.native.VideoStop(); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -108,6 +97,29 @@ func (s *grpcServer) VideoStart(ctx context.Context, req *pb.Empty) (*pb.Empty, 
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &pb.Empty{}, nil
+}
+
+func (s *grpcServer) VideoSnapshot(ctx context.Context, req *pb.VideoSnapshotRequest) (*pb.VideoSnapshotResponse, error) {
+	jpeg, err := s.native.VideoSnapshot(SnapshotOptions{
+		Quality:    int(req.Quality),
+		CropX:      int(req.CropX),
+		CropY:      int(req.CropY),
+		CropWidth:  int(req.CropWidth),
+		CropHeight: int(req.CropHeight),
+		Width:      int(req.Width),
+		Height:     int(req.Height),
+	})
+	switch {
+	case errors.Is(err, ErrVideoNotStreaming):
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, ErrSnapshotTimeout):
+		return nil, status.Error(codes.DeadlineExceeded, err.Error())
+	case errors.Is(err, ErrSnapshotInvalid):
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	case err != nil:
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &pb.VideoSnapshotResponse{Jpeg: jpeg}, nil
 }
 
 // UI methods

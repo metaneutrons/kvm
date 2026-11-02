@@ -13,9 +13,9 @@ type NativeInterface interface {
 	VideoSetEDID(edid string) error
 	VideoGetEDID() (string, error)
 	VideoLogStatus() (string, error)
-	VideoGetSnapshot() ([]byte, error)
 	VideoStop() error
 	VideoStart() error
+	VideoSnapshot(opts SnapshotOptions) ([]byte, error)
 	GetLVGLVersion() (string, error)
 	UIObjHide(objName string) (bool, error)
 	UIObjShow(objName string) (bool, error)

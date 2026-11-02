@@ -41,16 +41,16 @@ func (e *EmptyNativeInterface) VideoLogStatus() (string, error) {
 	return "", nil
 }
 
-func (e *EmptyNativeInterface) VideoGetSnapshot() ([]byte, error) {
-	return nil, ErrVideoNotStreaming
-}
-
 func (e *EmptyNativeInterface) VideoStop() error {
 	return nil
 }
 
 func (e *EmptyNativeInterface) VideoStart() error {
 	return nil
+}
+
+func (e *EmptyNativeInterface) VideoSnapshot(opts SnapshotOptions) ([]byte, error) {
+	return nil, ErrVideoNotStreaming
 }
 
 func (e *EmptyNativeInterface) GetLVGLVersion() (string, error) {

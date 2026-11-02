@@ -137,7 +137,7 @@ type recordingVideoNative struct {
 
 func (n *recordingVideoNative) VideoStart() error { n.calls = append(n.calls, "start"); return nil }
 func (n *recordingVideoNative) VideoStop() error  { n.calls = append(n.calls, "stop"); return nil }
-func (n *recordingVideoNative) VideoGetSnapshot() ([]byte, error) {
+func (n *recordingVideoNative) VideoSnapshot(native.SnapshotOptions) ([]byte, error) {
 	n.calls = append(n.calls, "snapshot")
 	return []byte("jpeg"), nil
 }
@@ -159,7 +159,7 @@ func TestScreenshotLeavesAPausedStreamPausedAfterTheLease(t *testing.T) {
 		videoPauseMu.Unlock()
 	}()
 
-	frame, err := captureScreenshot()
+	frame, err := captureScreenshot(native.SnapshotOptions{})
 	if err != nil || len(frame) == 0 {
 		t.Fatalf("frame=%d err=%v", len(frame), err)
 	}
@@ -174,7 +174,7 @@ func TestScreenshotLeavesAPausedStreamPausedAfterTheLease(t *testing.T) {
 		}
 	}
 	// A second screenshot inside the lease takes a single, fresh frame without restarting start.
-	if _, err := captureScreenshot(); err != nil {
+	if _, err := captureScreenshot(native.SnapshotOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := fake.calls[len(fake.calls)-1]; got != "snapshot" || fake.calls[len(fake.calls)-2] != "start" {
@@ -209,7 +209,9 @@ func (n *pauseCheckingNative) VideoStart() error {
 	return nil
 }
 
-func (n *pauseCheckingNative) VideoGetSnapshot() ([]byte, error) { return []byte("jpeg"), nil }
+func (n *pauseCheckingNative) VideoSnapshot(native.SnapshotOptions) ([]byte, error) {
+	return []byte("jpeg"), nil
+}
 
 func TestScreenshotStartsCaptureUnderPauseLock(t *testing.T) {
 	fake := &pauseCheckingNative{}
@@ -217,11 +219,10 @@ func TestScreenshotStartsCaptureUnderPauseLock(t *testing.T) {
 	nativeInstance = fake
 	defer func() { nativeInstance = original }()
 
-	if _, err := captureScreenshot(); err != nil {
+	if _, err := captureScreenshot(native.SnapshotOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if fake.startedUnlocked {
 		t.Fatal("capture was started without the pause lock, so a pause could slip in and be undone")
 	}
 }
-

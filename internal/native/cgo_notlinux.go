@@ -2,6 +2,8 @@
 
 package native
 
+import "time"
+
 func panicPlatformNotSupported() {
 	panic("platform not supported")
 }
@@ -123,11 +125,6 @@ func videoLogStatus() string {
 	return ""
 }
 
-func videoGetSnapshot() ([]byte, error) {
-	panicPlatformNotSupported()
-	return nil, nil
-}
-
 func videoGetEDID() (string, error) {
 	panicPlatformNotSupported()
 	return "", nil
@@ -136,6 +133,11 @@ func videoGetEDID() (string, error) {
 func videoSetEDID(edid string) error {
 	panicPlatformNotSupported()
 	return nil
+}
+
+func videoSnapshotJPEG(opts SnapshotOptions, timeout time.Duration) ([]byte, error) {
+	panicPlatformNotSupported()
+	return nil, nil
 }
 
 func videoGetStreamingStatus() VideoStreamingStatus {

@@ -5,6 +5,7 @@
 #include <rk_mpi_venc.h>
 #include <rk_mpi_sys.h>
 #include <string.h>
+#include <stdlib.h>
 #include <rk_debug.h>
 #include <malloc.h>
 #include <stdbool.h>
@@ -19,6 +20,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <rk_mpi_mmz.h>
+#include <rga/im2d.h>
+#include <rga/rga.h>
 #include <pthread.h>
 #include <assert.h>
 #include <sys/un.h>
@@ -38,7 +41,8 @@
 
 int sub_dev_fd = -1;
 #define VENC_CHANNEL 0
-#define VENC_CHANNEL_JPEG 1 // second encoder channel, used only for on-demand snapshots
+#define JPEG_VENC_CHANNEL 1
+#define SNAPSHOT_ENCODE_TIMEOUT_MS 1000
 MB_POOL memPool = MB_INVALID_POOLID;
 
 bool sleep_mode_available = false;
@@ -47,10 +51,7 @@ float quality_factor = 1.0f;
 int codec_type = 0;
 
 static void *venc_read_stream(void *arg);
-static int32_t venc_jpeg_start(int32_t width, int32_t height);
-static void venc_jpeg_stop(void);
-bool get_streaming_flag();
-bool get_streaming_stopped();
+static void snapshot_stop();
 
 RK_U64 get_us()
 {
@@ -293,14 +294,6 @@ static int32_t venc_start(int32_t bitrate, int32_t max_bitrate, int32_t width, i
         return ret;
     }
 
-    // Snapshot support is best-effort: if the JPEG channel fails to start,
-    // keep streaming the primary H.264/H.265 channel without it.
-    int32_t jpeg_ret = venc_jpeg_start(width, height);
-    if (jpeg_ret != RK_SUCCESS)
-    {
-        log_warn("failed to start JPEG snapshot channel: %#x", jpeg_ret);
-    }
-
     venc_running = true;
     venc_read_thread = malloc(sizeof(pthread_t));
     if (pthread_create(venc_read_thread, NULL, venc_read_stream, NULL) != 0)
@@ -315,8 +308,7 @@ static int32_t venc_start(int32_t bitrate, int32_t max_bitrate, int32_t width, i
 static int32_t venc_stop()
 {
     venc_running = false;
-
-    venc_jpeg_stop();
+    snapshot_stop();
 
     int32_t ret;
     ret = RK_MPI_VENC_StopRecvFrame(VENC_CHANNEL);
@@ -343,237 +335,457 @@ static int32_t venc_stop()
     return RK_SUCCESS;
 }
 
-// --- On-demand JPEG snapshot channel -----------------------------------
-//
-// A second VENC channel, created/destroyed alongside VENC_CHANNEL so it
-// always matches the current capture resolution. It receives frames
-// continuously (like VENC_CHANNEL) but produces no output unless
-// run_video_stream() explicitly feeds it a frame, which only happens while
-// a video_get_snapshot() call is pending.
-
-static pthread_mutex_t snapshot_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t snapshot_cond = PTHREAD_COND_INITIALIZER;
-static bool venc_jpeg_running = false;
-static bool snapshot_requested = false;
-static bool snapshot_ready = false;
-static uint8_t *snapshot_buf = NULL;
-static size_t snapshot_len = 0;
+/*
+ * JPEG snapshots.
+ *
+ * A caller of video_snapshot_jpeg() posts a request and waits. The capture thread
+ * picks it up in snapshot_handle_frame(), encodes the current frame on a second
+ * VENC channel and hands the result back. Only the capture thread touches the JPEG
+ * channel, and it encodes before the V4L2 buffer is queued again, so the snapshot
+ * cannot tear. The channel is created on the first request and destroyed together
+ * with the H.264/H.265 channel, so the feature costs nothing while unused.
+ *
+ * The capture delivers limited-range YCbCr (BT.709 for HD), while JPEG decoders
+ * assume full-range BT.601. Encoding the frame as is gives grey blacks and shifted
+ * hues, so the RGA first converts it to full-range RGB (about 5ms at 1080p) and the
+ * JPEG is encoded from that. The same RGA pass crops and scales, so a smaller or
+ * partial snapshot costs less to encode instead of more.
+ */
+static pthread_once_t snapshot_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t snapshot_request_mutex = PTHREAD_MUTEX_INITIALIZER; // one request at a time
+static pthread_mutex_t snapshot_mutex = PTHREAD_MUTEX_INITIALIZER;         // guards the request state
+static pthread_cond_t snapshot_cond;
+static bool snapshot_pending = false;
+static uint32_t snapshot_generation = 0;
+static jetkvm_snapshot_params_t snapshot_params;
 static int snapshot_result = 0;
+static uint8_t *snapshot_data = NULL;
+static size_t snapshot_len = 0;
 
-static void populate_venc_jpeg_attr(VENC_CHN_ATTR_S *stAttr, RK_U32 width, RK_U32 height)
+// owned by the capture thread
+static bool jpeg_chn_created = false;
+static RK_U32 jpeg_chn_width = 0;
+static RK_U32 jpeg_chn_height = 0;
+static int jpeg_chn_quality = 0;
+static MB_POOL jpeg_rgb_pool = MB_INVALID_POOLID;
+static MB_BLK jpeg_rgb_blk = RK_NULL;
+static RK_U64 jpeg_rgb_size = 0;
+
+static void snapshot_init()
 {
-    memset(stAttr, 0, sizeof(VENC_CHN_ATTR_S));
-
-    stAttr->stVencAttr.enType = RK_VIDEO_ID_JPEG;
-    stAttr->stVencAttr.enPixelFormat = RK_FMT_YUV422_YUYV;
-    stAttr->stVencAttr.u32PicWidth = width;
-    stAttr->stVencAttr.u32PicHeight = height;
-    stAttr->stVencAttr.u32VirWidth = RK_ALIGN_16(width);
-    stAttr->stVencAttr.u32VirHeight = RK_ALIGN_16(height);
-    stAttr->stVencAttr.u32StreamBufCnt = 2;
-    stAttr->stVencAttr.u32BufSize = width * height * 3 / 2;
-    stAttr->stVencAttr.enMirror = MIRROR_NONE;
+    // The device clock jumps when NTP syncs after boot, so wait on CLOCK_MONOTONIC.
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&snapshot_cond, &attr);
+    pthread_condattr_destroy(&attr);
 }
 
-static int32_t venc_jpeg_start(int32_t width, int32_t height)
+static void jpeg_rgb_release()
 {
-    VENC_CHN_ATTR_S stAttr;
-    populate_venc_jpeg_attr(&stAttr, (RK_U32)width, (RK_U32)height);
+    if (jpeg_rgb_blk != RK_NULL)
+    {
+        RK_MPI_MB_ReleaseMB(jpeg_rgb_blk);
+        jpeg_rgb_blk = RK_NULL;
+    }
+    if (jpeg_rgb_pool != MB_INVALID_POOLID)
+    {
+        RK_MPI_MB_DestroyPool(jpeg_rgb_pool);
+        jpeg_rgb_pool = MB_INVALID_POOLID;
+    }
+    jpeg_rgb_size = 0;
+}
 
-    int32_t ret = RK_MPI_VENC_CreateChn(VENC_CHANNEL_JPEG, &stAttr);
+static void jpeg_chn_destroy();
+
+// Prepares the RGB buffer for a frame of frame_width x frame_height, which is
+// the largest snapshot it can produce, and the JPEG channel for a picture of
+// width x height. The channel is recreated when the picture size changes.
+static int jpeg_chn_prepare(RK_U32 frame_width, RK_U32 frame_height, RK_U32 width, RK_U32 height, int quality)
+{
+    int32_t ret;
+
+    if (jpeg_chn_created && (width != jpeg_chn_width || height != jpeg_chn_height))
+    {
+        jpeg_chn_destroy();
+    }
+
+    RK_U64 rgb_size = (RK_U64)RK_ALIGN_16(frame_width) * RK_ALIGN_16(frame_height) * 3;
+    if (jpeg_rgb_blk != RK_NULL && rgb_size > jpeg_rgb_size)
+    {
+        jpeg_rgb_release();
+    }
+
+    if (jpeg_rgb_blk == RK_NULL)
+    {
+        MB_POOL_CONFIG_S stMbPoolCfg;
+        memset(&stMbPoolCfg, 0, sizeof(MB_POOL_CONFIG_S));
+        stMbPoolCfg.u64MBSize = rgb_size;
+        stMbPoolCfg.u32MBCnt = 1;
+        stMbPoolCfg.enAllocType = MB_ALLOC_TYPE_DMA;
+        stMbPoolCfg.bPreAlloc = RK_TRUE;
+        jpeg_rgb_pool = RK_MPI_MB_CreatePool(&stMbPoolCfg);
+        if (jpeg_rgb_pool == MB_INVALID_POOLID)
+        {
+            log_error("failed to create the JPEG snapshot RGB pool");
+            return VIDEO_SNAPSHOT_ERR_NOMEM;
+        }
+        jpeg_rgb_blk = RK_MPI_MB_GetMB(jpeg_rgb_pool, stMbPoolCfg.u64MBSize, RK_TRUE);
+        if (jpeg_rgb_blk == RK_NULL)
+        {
+            log_error("failed to get the JPEG snapshot RGB buffer");
+            RK_MPI_MB_DestroyPool(jpeg_rgb_pool);
+            jpeg_rgb_pool = MB_INVALID_POOLID;
+            return VIDEO_SNAPSHOT_ERR_NOMEM;
+        }
+        jpeg_rgb_size = rgb_size;
+    }
+
+    if (!jpeg_chn_created)
+    {
+        VENC_CHN_ATTR_S stAttr;
+        memset(&stAttr, 0, sizeof(VENC_CHN_ATTR_S));
+        stAttr.stVencAttr.enType = RK_VIDEO_ID_JPEG;
+        stAttr.stVencAttr.enPixelFormat = RK_FMT_RGB888;
+        stAttr.stVencAttr.u32PicWidth = width;
+        stAttr.stVencAttr.u32PicHeight = height;
+        stAttr.stVencAttr.u32VirWidth = RK_ALIGN_16(width);
+        stAttr.stVencAttr.u32VirHeight = RK_ALIGN_16(height);
+        stAttr.stVencAttr.u32StreamBufCnt = 1;
+        stAttr.stVencAttr.u32BufSize = width * height * 3 / 2;
+
+        ret = RK_MPI_VENC_CreateChn(JPEG_VENC_CHANNEL, &stAttr);
+        if (ret != RK_SUCCESS)
+        {
+            log_error("RK_MPI_VENC_CreateChn(JPEG) failed: %#x", ret);
+            return VIDEO_SNAPSHOT_ERR_ENCODE;
+        }
+        jpeg_chn_created = true;
+        jpeg_chn_width = width;
+        jpeg_chn_height = height;
+        jpeg_chn_quality = 0;
+        log_info("created JPEG snapshot channel %ux%u", width, height);
+    }
+
+    if (quality != jpeg_chn_quality)
+    {
+        VENC_JPEG_PARAM_S stJpegParam;
+        memset(&stJpegParam, 0, sizeof(VENC_JPEG_PARAM_S));
+        RK_MPI_VENC_GetJpegParam(JPEG_VENC_CHANNEL, &stJpegParam);
+        stJpegParam.u32Qfactor = quality;
+        ret = RK_MPI_VENC_SetJpegParam(JPEG_VENC_CHANNEL, &stJpegParam);
+        if (ret != RK_SUCCESS)
+        {
+            log_error("RK_MPI_VENC_SetJpegParam failed: %#x", ret);
+            return VIDEO_SNAPSHOT_ERR_ENCODE;
+        }
+        jpeg_chn_quality = quality;
+    }
+
+    return 0;
+}
+
+static void jpeg_chn_destroy()
+{
+    if (!jpeg_chn_created)
+    {
+        return;
+    }
+    RK_MPI_VENC_StopRecvFrame(JPEG_VENC_CHANNEL);
+    int32_t ret = RK_MPI_VENC_DestroyChn(JPEG_VENC_CHANNEL);
     if (ret != RK_SUCCESS)
+    {
+        log_error("RK_MPI_VENC_DestroyChn(JPEG) failed: %#x", ret);
+    }
+    jpeg_chn_created = false;
+}
+
+// Smallest snapshot side; the RGA cannot scale down by more than 16 times.
+#define SNAPSHOT_MIN_SIZE 16
+
+// Fits the requested region and size to the frame: the region is clamped to
+// the frame and its position and size are aligned to even pixels, which the
+// RGA requires for YUV sources, and the picture is no larger than the region.
+static int snapshot_geometry(const jetkvm_snapshot_params_t *p, RK_U32 frame_width, RK_U32 frame_height,
+                             im_rect *crop, RK_U32 *out_width, RK_U32 *out_height)
+{
+    int x = p->crop_x, y = p->crop_y, w = p->crop_width, h = p->crop_height;
+    if (w <= 0 || h <= 0)
+    {
+        x = 0;
+        y = 0;
+        w = (int)frame_width;
+        h = (int)frame_height;
+    }
+    if (x < 0 || y < 0 || x >= (int)frame_width || y >= (int)frame_height)
+    {
+        return VIDEO_SNAPSHOT_ERR_INVALID;
+    }
+    if (x + w > (int)frame_width)
+        w = (int)frame_width - x;
+    if (y + h > (int)frame_height)
+        h = (int)frame_height - y;
+    x &= ~1;
+    y &= ~1;
+    w &= ~1;
+    h &= ~1;
+    if (w < SNAPSHOT_MIN_SIZE || h < SNAPSHOT_MIN_SIZE)
+    {
+        return VIDEO_SNAPSHOT_ERR_INVALID;
+    }
+
+    // A single given side keeps the region's aspect ratio.
+    int ow = p->out_width, oh = p->out_height;
+    if (ow > 0 && oh <= 0)
+        oh = (int)(((long long)h * ow + w / 2) / w);
+    else if (oh > 0 && ow <= 0)
+        ow = (int)(((long long)w * oh + h / 2) / h);
+    if (ow <= 0 || ow > w)
+        ow = w;
+    if (oh <= 0 || oh > h)
+        oh = h;
+    ow &= ~1;
+    oh &= ~1;
+    if (ow < SNAPSHOT_MIN_SIZE || oh < SNAPSHOT_MIN_SIZE || ow * 16 < w || oh * 16 < h)
+    {
+        return VIDEO_SNAPSHOT_ERR_INVALID;
+    }
+
+    crop->x = x;
+    crop->y = y;
+    crop->width = w;
+    crop->height = h;
+    *out_width = (RK_U32)ow;
+    *out_height = (RK_U32)oh;
+    return 0;
+}
+
+static int jpeg_encode_frame(VIDEO_FRAME_INFO_S *frame, const jetkvm_snapshot_params_t *params,
+                             uint8_t **data, size_t *len)
+{
+    RK_U32 frame_width = frame->stVFrame.u32Width;
+    RK_U32 frame_height = frame->stVFrame.u32Height;
+
+    im_rect crop;
+    RK_U32 width, height;
+    int ret = snapshot_geometry(params, frame_width, frame_height, &crop, &width, &height);
+    if (ret != 0)
     {
         return ret;
     }
 
-    VENC_JPEG_PARAM_S stJpegParam;
-    memset(&stJpegParam, 0, sizeof(stJpegParam));
-    stJpegParam.u32Qfactor = 90;
-    ret = RK_MPI_VENC_SetJpegParam(VENC_CHANNEL_JPEG, &stJpegParam);
-    if (ret != RK_SUCCESS)
+    ret = jpeg_chn_prepare(frame_width, frame_height, width, height, params->quality);
+    if (ret != 0)
     {
-        log_warn("RK_MPI_VENC_SetJpegParam failed: %#x, using encoder default quality", ret);
+        return ret;
     }
+
+    RK_U32 vir_width = RK_ALIGN_16(width);
+    RK_U32 vir_height = RK_ALIGN_16(height);
+    rga_buffer_t src = wrapbuffer_fd_t(RK_MPI_MB_Handle2Fd(frame->stVFrame.pMbBlk), frame_width, frame_height,
+                                       frame->stVFrame.u32VirWidth, frame->stVFrame.u32VirHeight,
+                                       RK_FORMAT_YUYV_422);
+    rga_buffer_t dst = wrapbuffer_fd_t(RK_MPI_MB_Handle2Fd(jpeg_rgb_blk), width, height, vir_width, vir_height,
+                                       RK_FORMAT_RGB_888);
+    // Colour conversion, crop and scale in one pass, as imcvtcolor_t does it
+    // for the whole frame.
+    dst.color_space_mode = is_hd_video(frame_height) ? IM_YUV_TO_RGB_BT709_LIMIT : IM_YUV_TO_RGB_BT601_LIMIT;
+    rga_buffer_t pat;
+    memset(&pat, 0, sizeof(pat));
+    im_rect drect = {0, 0, (int)width, (int)height};
+    im_rect prect;
+    memset(&prect, 0, sizeof(prect));
+    IM_STATUS im_ret = improcess(src, dst, pat, crop, drect, prect, IM_SYNC);
+    if (im_ret != IM_STATUS_SUCCESS)
+    {
+        log_error("RGA conversion for snapshot failed: %s", imStrError_t(im_ret));
+        return VIDEO_SNAPSHOT_ERR_ENCODE;
+    }
+
+    VIDEO_FRAME_INFO_S rgb_frame = *frame;
+    rgb_frame.stVFrame.pMbBlk = jpeg_rgb_blk;
+    rgb_frame.stVFrame.enPixelFormat = RK_FMT_RGB888;
+    rgb_frame.stVFrame.u32Width = width;
+    rgb_frame.stVFrame.u32Height = height;
+    rgb_frame.stVFrame.u32VirWidth = vir_width;
+    rgb_frame.stVFrame.u32VirHeight = vir_height;
 
     VENC_RECV_PIC_PARAM_S stRecvParam;
     memset(&stRecvParam, 0, sizeof(VENC_RECV_PIC_PARAM_S));
-    stRecvParam.s32RecvPicNum = -1;
-    ret = RK_MPI_VENC_StartRecvFrame(VENC_CHANNEL_JPEG, &stRecvParam);
-    if (ret != RK_SUCCESS)
+    stRecvParam.s32RecvPicNum = 1;
+    int32_t rk_ret = RK_MPI_VENC_StartRecvFrame(JPEG_VENC_CHANNEL, &stRecvParam);
+    if (rk_ret != RK_SUCCESS)
     {
-        RK_MPI_VENC_DestroyChn(VENC_CHANNEL_JPEG);
-        return ret;
+        log_error("RK_MPI_VENC_StartRecvFrame(JPEG) failed: %#x", rk_ret);
+        return VIDEO_SNAPSHOT_ERR_ENCODE;
     }
 
-    pthread_mutex_lock(&snapshot_mutex);
-    venc_jpeg_running = true;
-    pthread_mutex_unlock(&snapshot_mutex);
+    rk_ret = RK_MPI_VENC_SendFrame(JPEG_VENC_CHANNEL, &rgb_frame, SNAPSHOT_ENCODE_TIMEOUT_MS);
+    if (rk_ret != RK_SUCCESS)
+    {
+        log_error("RK_MPI_VENC_SendFrame(JPEG) failed: %#x", rk_ret);
+        // A frame may still be in flight. Recreate the channel so the next
+        // snapshot cannot receive this one.
+        jpeg_chn_destroy();
+        return VIDEO_SNAPSHOT_ERR_ENCODE;
+    }
 
-    return RK_SUCCESS;
+    VENC_PACK_S stPack;
+    VENC_STREAM_S stStream;
+    memset(&stStream, 0, sizeof(VENC_STREAM_S));
+    stStream.pstPack = &stPack;
+    rk_ret = RK_MPI_VENC_GetStream(JPEG_VENC_CHANNEL, &stStream, SNAPSHOT_ENCODE_TIMEOUT_MS);
+    if (rk_ret != RK_SUCCESS)
+    {
+        log_error("RK_MPI_VENC_GetStream(JPEG) failed: %#x", rk_ret);
+        // A frame may still be in flight. Recreate the channel so the next
+        // snapshot cannot receive this one.
+        jpeg_chn_destroy();
+        return VIDEO_SNAPSHOT_ERR_ENCODE;
+    }
+
+    ret = 0;
+    *len = stStream.pstPack->u32Len;
+    *data = malloc(*len);
+    if (*data == NULL)
+    {
+        ret = VIDEO_SNAPSHOT_ERR_NOMEM;
+    }
+    else
+    {
+        memcpy(*data, RK_MPI_MB_Handle2VirAddr(stStream.pstPack->pMbBlk), *len);
+    }
+
+    rk_ret = RK_MPI_VENC_ReleaseStream(JPEG_VENC_CHANNEL, &stStream);
+    if (rk_ret != RK_SUCCESS)
+    {
+        log_error("RK_MPI_VENC_ReleaseStream(JPEG) failed: %#x", rk_ret);
+    }
+
+    return ret;
 }
 
-static void venc_jpeg_stop(void)
+// Called by the capture thread for every frame, after it went to the stream
+// encoder and before its buffer is handed back to V4L2.
+static void snapshot_handle_frame(VIDEO_FRAME_INFO_S *frame)
 {
     pthread_mutex_lock(&snapshot_mutex);
-    if (!venc_jpeg_running)
+    bool pending = snapshot_pending;
+    uint32_t generation = snapshot_generation;
+    jetkvm_snapshot_params_t params = snapshot_params;
+    pthread_mutex_unlock(&snapshot_mutex);
+
+    if (!pending)
     {
-        pthread_mutex_unlock(&snapshot_mutex);
         return;
     }
-    venc_jpeg_running = false;
 
-    // Wake up a snapshot request that's still waiting; the channel is going away.
-    if (snapshot_requested)
+    uint8_t *data = NULL;
+    size_t len = 0;
+    RK_U64 start = get_us();
+    int ret = jpeg_encode_frame(frame, &params, &data, &len);
+    log_trace("snapshot encoded: ret=%d len=%zu in %lluus", ret, len, get_us() - start);
+
+    pthread_mutex_lock(&snapshot_mutex);
+    if (snapshot_pending && snapshot_generation == generation)
     {
-        snapshot_requested = false;
+        snapshot_result = ret;
+        snapshot_data = data;
+        snapshot_len = len;
+        snapshot_pending = false;
+        pthread_cond_broadcast(&snapshot_cond);
+    }
+    else
+    {
+        // the caller gave up waiting
+        free(data);
+    }
+    pthread_mutex_unlock(&snapshot_mutex);
+}
+
+// Called by the capture thread when the encoder goes away.
+static void snapshot_stop()
+{
+    pthread_once(&snapshot_once, snapshot_init);
+
+    pthread_mutex_lock(&snapshot_mutex);
+    if (snapshot_pending)
+    {
         snapshot_result = VIDEO_SNAPSHOT_ERR_NOT_STREAMING;
-        snapshot_ready = true;
+        snapshot_pending = false;
         pthread_cond_broadcast(&snapshot_cond);
     }
     pthread_mutex_unlock(&snapshot_mutex);
 
-    RK_MPI_VENC_StopRecvFrame(VENC_CHANNEL_JPEG);
-    RK_MPI_VENC_DestroyChn(VENC_CHANNEL_JPEG);
+    jpeg_chn_destroy();
+    jpeg_rgb_release();
 }
 
-// Delivers a snapshot result to the (single) waiting video_get_snapshot()
-// call and wakes it up. Takes ownership of buf (may be NULL on error).
-static void complete_snapshot_request(uint8_t *buf, size_t len, int result)
+int video_snapshot_jpeg(const jetkvm_snapshot_params_t *params, int timeout_ms, uint8_t **data, size_t *len)
 {
-    pthread_mutex_lock(&snapshot_mutex);
-    snapshot_requested = false;
-    free(snapshot_buf); // defensive; should already be NULL here
-    snapshot_buf = buf;
-    snapshot_len = len;
-    snapshot_result = result;
-    snapshot_ready = true;
-    pthread_cond_broadcast(&snapshot_cond);
-    pthread_mutex_unlock(&snapshot_mutex);
-}
+    pthread_once(&snapshot_once, snapshot_init);
 
-// Runs on the video capture thread, so it must stay fast: it blocks
-// VIDIOC_QBUF on the primary V4L2 capture loop (only input_buffer_count
-// buffers deep) for as long as it takes. A single failed attempt here just
-// means this frame's snapshot is skipped — the Go-side caller retries
-// against the next captured frame rather than this function retrying
-// in-place and doubling the stall.
-//
-// pFrame is the just-captured raw frame that was already handed to
-// VENC_CHANNEL; reusing it here avoids capturing a second frame off V4L2
-// just for the snapshot.
-static void handle_snapshot_request(VIDEO_FRAME_INFO_S *pFrame)
-{
-    if (RK_MPI_VENC_SendFrame(VENC_CHANNEL_JPEG, pFrame, 150) != RK_SUCCESS)
+    *data = NULL;
+    *len = 0;
+    if (params == NULL || params->quality < 1 || params->quality > 99)
     {
-        log_error("snapshot: RK_MPI_VENC_SendFrame(JPEG) failed");
-        complete_snapshot_request(NULL, 0, VIDEO_SNAPSHOT_ERR_ENCODE);
-        return;
+        return VIDEO_SNAPSHOT_ERR_INVALID;
     }
 
-    VENC_STREAM_S stJpegStream;
-    memset(&stJpegStream, 0, sizeof(stJpegStream));
-    stJpegStream.pstPack = malloc(sizeof(VENC_PACK_S));
-    if (stJpegStream.pstPack == NULL)
-    {
-        complete_snapshot_request(NULL, 0, VIDEO_SNAPSHOT_ERR_NOMEM);
-        return;
-    }
-
-    int32_t ret = RK_MPI_VENC_GetStream(VENC_CHANNEL_JPEG, &stJpegStream, 150);
-    if (ret != RK_SUCCESS)
-    {
-        log_error("snapshot: RK_MPI_VENC_GetStream(JPEG) failed %#x", ret);
-        free(stJpegStream.pstPack);
-        complete_snapshot_request(NULL, 0, VIDEO_SNAPSHOT_ERR_ENCODE);
-        return;
-    }
-
-    void *pData = RK_MPI_MB_Handle2VirAddr(stJpegStream.pstPack->pMbBlk);
-    size_t len = (size_t)stJpegStream.pstPack->u32Len;
-    uint8_t *copy = malloc(len);
-    if (copy == NULL)
-    {
-        RK_MPI_VENC_ReleaseStream(VENC_CHANNEL_JPEG, &stJpegStream);
-        free(stJpegStream.pstPack);
-        complete_snapshot_request(NULL, 0, VIDEO_SNAPSHOT_ERR_NOMEM);
-        return;
-    }
-    memcpy(copy, pData, len);
-
-    RK_MPI_VENC_ReleaseStream(VENC_CHANNEL_JPEG, &stJpegStream);
-    free(stJpegStream.pstPack);
-
-    complete_snapshot_request(copy, len, 0);
-}
-
-int video_get_snapshot(uint8_t **out_buf, size_t *out_len)
-{
-    if (!get_streaming_flag() || get_streaming_stopped())
-    {
-        return VIDEO_SNAPSHOT_ERR_NOT_STREAMING;
-    }
-
+    pthread_mutex_lock(&snapshot_request_mutex);
     pthread_mutex_lock(&snapshot_mutex);
 
-    if (!venc_jpeg_running)
+    if (!venc_running)
     {
         pthread_mutex_unlock(&snapshot_mutex);
+        pthread_mutex_unlock(&snapshot_request_mutex);
         return VIDEO_SNAPSHOT_ERR_NOT_STREAMING;
     }
 
-    snapshot_requested = true;
-    snapshot_ready = false;
-    free(snapshot_buf);
-    snapshot_buf = NULL;
+    snapshot_generation++;
+    snapshot_params = *params;
+    snapshot_result = VIDEO_SNAPSHOT_ERR_TIMEOUT;
+    snapshot_data = NULL;
     snapshot_len = 0;
-    snapshot_result = 0;
+    snapshot_pending = true;
 
-    // This function is called under the Go side's cgoLock (a single global
-    // mutex shared by every native call, including UI ticks), so the wait
-    // here directly stalls unrelated native operations for its duration.
-    // Kept short; the Go-side caller (captureScreenshot) retries across
-    // several calls rather than this one call waiting longer.
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 300000000L; // 300ms: one frame period plus JPEG encode headroom
-    if (ts.tv_nsec >= 1000000000L)
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000;
+    if (deadline.tv_nsec >= 1000000000)
     {
-        ts.tv_sec += 1;
-        ts.tv_nsec -= 1000000000L;
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000;
     }
 
-    int wait_rc = 0;
-    while (!snapshot_ready && wait_rc == 0)
+    while (snapshot_pending)
     {
-        wait_rc = pthread_cond_timedwait(&snapshot_cond, &snapshot_mutex, &ts);
+        if (pthread_cond_timedwait(&snapshot_cond, &snapshot_mutex, &deadline) == ETIMEDOUT)
+        {
+            break;
+        }
     }
 
-    int result;
-    if (!snapshot_ready)
+    int ret;
+    if (snapshot_pending)
     {
-        snapshot_requested = false;
-        result = VIDEO_SNAPSHOT_ERR_TIMEOUT;
-    }
-    else if (snapshot_result != 0 || snapshot_buf == NULL)
-    {
-        result = (snapshot_result != 0) ? snapshot_result : VIDEO_SNAPSHOT_ERR_ENCODE;
+        // nobody served the request in time, withdraw it
+        snapshot_pending = false;
+        ret = VIDEO_SNAPSHOT_ERR_TIMEOUT;
     }
     else
     {
-        *out_buf = snapshot_buf;
-        *out_len = snapshot_len;
-        snapshot_buf = NULL;
+        ret = snapshot_result;
+        *data = snapshot_data;
+        *len = snapshot_len;
+        snapshot_data = NULL;
         snapshot_len = 0;
-        result = 0;
     }
 
     pthread_mutex_unlock(&snapshot_mutex);
-    return result;
-}
-
-void video_free_snapshot(uint8_t *buf)
-{
-    free(buf);
+    pthread_mutex_unlock(&snapshot_request_mutex);
+    return ret;
 }
 
 struct buffer
@@ -997,15 +1209,9 @@ void *run_video_stream(void *arg)
                 }
             }
 
-            num++;
+            snapshot_handle_frame(&stFrame);
 
-            pthread_mutex_lock(&snapshot_mutex);
-            bool want_snapshot = venc_jpeg_running && snapshot_requested;
-            pthread_mutex_unlock(&snapshot_mutex);
-            if (want_snapshot)
-            {
-                handle_snapshot_request(&stFrame);
-            }
+            num++;
 
             if (ioctl(video_dev_fd, VIDIOC_QBUF, &buf) < 0)
                 log_error("failure VIDIOC_QBUF: %s", strerror(errno));

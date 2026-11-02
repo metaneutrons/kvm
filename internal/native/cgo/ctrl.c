@@ -403,6 +403,10 @@ int jetkvm_video_get_codec_type() {
     return video_get_codec_type();
 }
 
+int jetkvm_video_snapshot_jpeg(const jetkvm_snapshot_params_t *params, int timeout_ms, uint8_t **data, size_t *len) {
+    return video_snapshot_jpeg(params, timeout_ms, data, len);
+}
+
 int jetkvm_video_set_edid(const char *edid_hex) {
     uint8_t edid[256];
     int edid_len = hex_to_bytes(edid_hex, edid, 256);
@@ -427,14 +431,6 @@ jetkvm_video_state_t *jetkvm_video_get_status() {
 
 char *jetkvm_video_log_status() {
     return (char *)videoc_log_status();
-}
-
-int jetkvm_video_get_snapshot(uint8_t **out_buf, size_t *out_len) {
-    return video_get_snapshot(out_buf, out_len);
-}
-
-void jetkvm_video_free_snapshot(uint8_t *buf) {
-    video_free_snapshot(buf);
 }
 
 int jetkvm_video_init(float factor) {

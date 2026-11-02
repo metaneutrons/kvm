@@ -8,11 +8,6 @@ import (
 	"time"
 )
 
-// ErrVideoNotStreaming is returned by VideoGetSnapshot when there's no
-// active video capture to snapshot (video only streams while at least one
-// WebRTC viewer session is connected).
-var ErrVideoNotStreaming = errors.New("video stream is not active")
-
 const sleepModeFile = "/sys/devices/platform/ff470000.i2c/i2c-4/4-000f/sleep_mode"
 
 // DefaultEDID is the default EDID for the video stream.
@@ -27,6 +22,35 @@ const DefaultEDID = "00FFFFFFFFFFFF0028B4010001EEFFC0302301038047287856EE91A3544
 const DisabledEDID = "__JETKVM_DISABLED_EDID__"
 
 var extraLockTimeout = 5 * time.Second
+
+// DefaultSnapshotQuality is the JPEG quality factor used when none is given.
+const DefaultSnapshotQuality = 80
+
+// snapshotTimeout bounds the wait for the capture thread to encode a frame.
+const snapshotTimeout = 1 * time.Second
+
+var (
+	// ErrVideoNotStreaming is returned when a snapshot is requested while no video is captured.
+	ErrVideoNotStreaming = errors.New("video is not streaming")
+	// ErrSnapshotTimeout is returned when no frame was encoded within the snapshot timeout.
+	ErrSnapshotTimeout = errors.New("timed out waiting for a video frame")
+	// ErrSnapshotInvalid is returned for a quality, region or size the snapshot cannot use.
+	ErrSnapshotInvalid = errors.New("invalid snapshot quality, region or size")
+)
+
+// SnapshotOptions select the quality, the part of the frame and the size of a
+// snapshot. The zero value takes the whole frame at its own size.
+type SnapshotOptions struct {
+	// Quality is the JPEG quality factor, 1-99; 0 selects DefaultSnapshotQuality.
+	Quality int
+	// CropX, CropY, CropWidth and CropHeight are the region in frame pixels. A
+	// zero CropWidth takes the whole frame. The region is clipped to the frame.
+	CropX, CropY, CropWidth, CropHeight int
+	// Width and Height are the size of the JPEG. With only one of them set,
+	// the other keeps the region's aspect ratio; with neither, the JPEG has the
+	// size of the region. It is never larger than the region.
+	Width, Height int
+}
 
 // VideoState is the state of the video stream.
 type VideoState struct {
@@ -216,15 +240,6 @@ func (n *Native) VideoLogStatus() (string, error) {
 	return videoLogStatus(), nil
 }
 
-// VideoGetSnapshot captures a single JPEG-encoded frame of the current video feed.
-// Returns ErrVideoNotStreaming if no video capture is currently running.
-func (n *Native) VideoGetSnapshot() ([]byte, error) {
-	n.videoLock.Lock()
-	defer n.videoLock.Unlock()
-
-	return videoGetSnapshot()
-}
-
 // VideoStop stops the video stream.
 func (n *Native) VideoStop() error {
 	n.videoLock.Lock()
@@ -254,6 +269,16 @@ func (n *Native) VideoStart() error {
 
 	videoStart()
 	return nil
+}
+
+// VideoSnapshot encodes the next captured frame as JPEG. It does not take
+// videoLock, so a snapshot is not held up by a slow stream reconfiguration; the
+// native side handles the stream stopping meanwhile.
+func (n *Native) VideoSnapshot(opts SnapshotOptions) ([]byte, error) {
+	if opts.Quality == 0 {
+		opts.Quality = DefaultSnapshotQuality
+	}
+	return videoSnapshotJPEG(opts, snapshotTimeout)
 }
 
 // VideoGetStreamingStatus gets the streaming status of the video.

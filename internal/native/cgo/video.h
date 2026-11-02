@@ -1,8 +1,7 @@
 #ifndef VIDEO_DAEMON_VIDEO_H
 #define VIDEO_DAEMON_VIDEO_H
 
-#include <stddef.h>
-#include <stdint.h>
+#include "ctrl.h"
 
 /**
  * @brief Initialize the video subsystem
@@ -65,25 +64,18 @@ void video_set_codec_type(int type);
  */
 int video_get_codec_type();
 
-#define VIDEO_SNAPSHOT_ERR_NOT_STREAMING (-1) // no active video stream to snapshot
-#define VIDEO_SNAPSHOT_ERR_TIMEOUT       (-2) // no frame captured within the deadline
-#define VIDEO_SNAPSHOT_ERR_ENCODE        (-3) // JPEG encoder failed
-#define VIDEO_SNAPSHOT_ERR_NOMEM         (-4) // failed to allocate the output buffer
-
 /**
- * @brief Capture a single JPEG-encoded snapshot of the current video frame.
+ * @brief Encode the next captured frame as JPEG
  *
- * Blocks until the next captured frame has been JPEG-encoded, or until an
- * internal deadline expires. On success, *out_buf is a malloc'd buffer of
- * *out_len bytes that the caller must release with video_free_snapshot().
+ * Blocks until the capture thread has encoded a frame or the timeout expires.
+ * Requires the video stream to be running.
  *
- * @return 0 on success, a negative VIDEO_SNAPSHOT_ERR_* code on failure
+ * @param params Quality, region and size of the snapshot (jetkvm_snapshot_params_t in ctrl.h)
+ * @param timeout_ms Maximum time to wait for a frame
+ * @param data Receives a malloc'd buffer with the JPEG data, to be freed by the caller
+ * @param len Receives the length of the JPEG data
+ * @return int 0 on success, one of VIDEO_SNAPSHOT_ERR_* (ctrl.h) on failure
  */
-int video_get_snapshot(uint8_t **out_buf, size_t *out_len);
-
-/**
- * @brief Free a buffer returned by video_get_snapshot()
- */
-void video_free_snapshot(uint8_t *buf);
+int video_snapshot_jpeg(const jetkvm_snapshot_params_t *params, int timeout_ms, uint8_t **data, size_t *len);
 
 #endif //VIDEO_DAEMON_VIDEO_H

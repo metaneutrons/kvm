@@ -8,6 +8,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -66,8 +67,9 @@ var (
 // open). Capture then stays up for screenshotLease after the last
 // screenshot and is stopped unless a session is streaming, so a session
 // that paused the stream, as a hidden tab or the virtual media dialog
-// does, gets it back paused once the screenshots stop.
-func captureScreenshot() ([]byte, error) {
+// does, gets it back paused once the screenshots stop. opts select the
+// quality, region and size of the picture; the zero value is the whole frame.
+func captureScreenshot(opts native.SnapshotOptions) ([]byte, error) {
 	screenshotInFlightMu.Lock()
 	screenshotInFlight++
 	screenshotInFlightMu.Unlock()
@@ -91,25 +93,26 @@ func captureScreenshot() ([]byte, error) {
 	if coldStart {
 		// The first frames after a start can come from the capture pool as
 		// it was before the stop, so skip one and let the pool turn over.
-		if _, err := snapshotBefore(deadline); err != nil {
+		if _, err := snapshotBefore(deadline, opts); err != nil {
 			return nil, err
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return snapshotBefore(deadline)
+	return snapshotBefore(deadline, opts)
 }
 
 // snapshotBefore asks the native side for a frame until deadline. It retries
 // on any error, not just ErrVideoNotStreaming: the native side also returns
 // transient per-attempt errors (encoder timeout, no frame yet) while capture
-// is still spinning up or between frames.
-func snapshotBefore(deadline time.Time) ([]byte, error) {
+// is still spinning up or between frames. A quality, region or size the
+// snapshot cannot use fails for every frame, so it is returned at once.
+func snapshotBefore(deadline time.Time, opts native.SnapshotOptions) ([]byte, error) {
 	for {
-		jpegBytes, err := nativeInstance.VideoGetSnapshot()
+		jpegBytes, err := nativeInstance.VideoSnapshot(opts)
 		if err == nil {
 			return jpegBytes, nil
 		}
-		if !time.Now().Before(deadline) {
+		if errors.Is(err, native.ErrSnapshotInvalid) || !time.Now().Before(deadline) {
 			return nil, err
 		}
 		time.Sleep(screenshotSnapshotRetryWait)
@@ -149,11 +152,52 @@ func releaseScreenshotLease() {
 	_ = nativeInstance.VideoStop()
 }
 
+// parseSnapshotOptions reads the optional query parameters of a screenshot:
+// quality (1-99); x, y, w and h select a region in video pixels, w and h
+// together; width scales the picture down to that width, keeping the aspect
+// ratio. It answers 400 itself and returns false for a value it cannot use.
+func parseSnapshotOptions(c *gin.Context) (native.SnapshotOptions, bool) {
+	var opts native.SnapshotOptions
+	params := []struct {
+		name     string
+		dst      *int
+		min, max int
+	}{
+		{"quality", &opts.Quality, 1, 99},
+		{"x", &opts.CropX, 0, 1 << 15},
+		{"y", &opts.CropY, 0, 1 << 15},
+		{"w", &opts.CropWidth, 16, 1 << 15},
+		{"h", &opts.CropHeight, 16, 1 << 15},
+		{"width", &opts.Width, 16, 1 << 15},
+	}
+	for _, p := range params {
+		raw := c.Query(p.name)
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < p.min || v > p.max {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("%s must be between %d and %d", p.name, p.min, p.max)})
+			return opts, false
+		}
+		*p.dst = v
+	}
+	if (opts.CropWidth == 0) != (opts.CropHeight == 0) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "a region needs both w and h"})
+		return opts, false
+	}
+	return opts, true
+}
+
 // handleScreenshotJPEG returns a single JPEG-encoded frame of the current
 // video feed, straight from the native capture. Starts video capture on
 // demand if nothing is currently streaming.
 func handleScreenshotJPEG(c *gin.Context) {
-	jpegBytes, err := captureScreenshot()
+	opts, ok := parseSnapshotOptions(c)
+	if !ok {
+		return
+	}
+	jpegBytes, err := captureScreenshot(opts)
 	if err != nil {
 		writeScreenshotError(c, err)
 		return
@@ -165,7 +209,16 @@ func handleScreenshotJPEG(c *gin.Context) {
 // re-encoded as PNG. The capture hardware only produces JPEG, so this costs
 // a decode+re-encode on the device CPU; fine for an occasional snapshot.
 func handleScreenshotPNG(c *gin.Context) {
-	jpegBytes, err := captureScreenshot()
+	opts, ok := parseSnapshotOptions(c)
+	if !ok {
+		return
+	}
+	// The picture is encoded once more as PNG, so it is taken at the best
+	// JPEG quality unless the caller asks for another.
+	if opts.Quality == 0 {
+		opts.Quality = 99
+	}
+	jpegBytes, err := captureScreenshot(opts)
 	if err != nil {
 		writeScreenshotError(c, err)
 		return
@@ -189,6 +242,10 @@ func handleScreenshotPNG(c *gin.Context) {
 func writeScreenshotError(c *gin.Context, err error) {
 	if errors.Is(err, native.ErrVideoNotStreaming) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "no video signal detected (timed out starting capture)"})
+		return
+	}
+	if errors.Is(err, native.ErrSnapshotInvalid) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "the region is outside the video or too small to scale this far"})
 		return
 	}
 	c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

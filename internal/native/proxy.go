@@ -505,12 +505,12 @@ func (p *NativeProxy) Stop() error {
 	return nil
 }
 
-func zeroValue[V string | bool | float64 | int | []byte]() V {
+func zeroValue[V string | bool | float64 | int]() V {
 	var v V
 	return v
 }
 
-func nativeProxyClientExec[K comparable, V string | bool | float64 | int | []byte](p *NativeProxy, fn func(*GRPCClient) (V, error)) (V, error) {
+func nativeProxyClientExec[K comparable, V string | bool | float64 | int](p *NativeProxy, fn func(*GRPCClient) (V, error)) (V, error) {
 	p.clientMu.RLock()
 	defer p.clientMu.RUnlock()
 
@@ -594,14 +594,6 @@ func (p *NativeProxy) VideoLogStatus() (string, error) {
 	})
 }
 
-func (p *NativeProxy) VideoGetSnapshot() ([]byte, error) {
-	// []byte isn't `comparable`, so K (unused by nativeProxyClientExec) can't be
-	// instantiated as []byte too; bool is an arbitrary stand-in.
-	return nativeProxyClientExec[bool, []byte](p, func(client *GRPCClient) ([]byte, error) {
-		return client.VideoGetSnapshot()
-	})
-}
-
 func (p *NativeProxy) VideoStop() error {
 	return nativeProxyClientExecWithoutArgument(p, func(client *GRPCClient) error {
 		return client.VideoStop()
@@ -612,6 +604,17 @@ func (p *NativeProxy) VideoStart() error {
 	return nativeProxyClientExecWithoutArgument(p, func(client *GRPCClient) error {
 		return client.VideoStart()
 	})
+}
+
+func (p *NativeProxy) VideoSnapshot(opts SnapshotOptions) ([]byte, error) {
+	p.clientMu.RLock()
+	defer p.clientMu.RUnlock()
+
+	if p.client == nil {
+		return nil, fmt.Errorf("gRPC client not initialized")
+	}
+
+	return p.client.VideoSnapshot(opts)
 }
 
 func (p *NativeProxy) GetLVGLVersion() (string, error) {
