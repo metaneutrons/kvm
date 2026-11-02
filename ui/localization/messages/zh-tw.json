@@ -22,6 +22,8 @@
     "access_api_token_never_used": "從未使用",
     "access_api_token_new_description": "請立即複製權杖。它不會再次顯示。",
     "access_api_token_new_title": "新的 API 權杖",
+    "access_api_token_perm_display": "顯示器",
+    "access_api_token_perm_display_description": "變更 EDID，用以設定主機偵測到的顯示器",
     "access_api_token_perm_input": "輸入",
     "access_api_token_perm_input_description": "鍵盤、滑鼠和防休眠",
     "access_api_token_perm_media": "虛擬媒體",

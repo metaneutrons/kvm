@@ -425,8 +425,8 @@ type SSHKeyState struct {
 // tls, local_loopback, log_level, tailscale: the HTTPS setting (Access page),
 // the loopback-only setting and the default log level (Advanced page) and the
 // Tailscale card (Network page), each shown only when reported.
-// api: the /api routes (snapshot, JSON-RPC) and the API token under
-// /auth/api-token exist.
+// api: the /api routes (snapshot, JSON-RPC, MCP) and the API tokens under
+// /auth/api-tokens exist.
 func rpcGetDeviceCapabilities() ([]string, error) {
 	return []string{
 		"shell", "extensions", "usb_serial", "custom_edid", "upload_channel", "video_during_update",
@@ -462,7 +462,11 @@ func rpcSetVideoStreamPaused(session *Session, paused bool) error {
 	defer videoPauseMu.Unlock()
 	if paused {
 		videoPausedBy = session
+		videoLeaseTookPauseFrom = nil
 		return stopVideoPipelineLocked()
+	}
+	if videoLeaseTookPauseFrom == session {
+		videoLeaseTookPauseFrom = nil
 	}
 	if videoPausedBy != nil && videoPausedBy != session {
 		return nil

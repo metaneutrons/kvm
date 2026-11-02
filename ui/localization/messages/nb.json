@@ -22,6 +22,8 @@
     "access_api_token_never_used": "Aldri brukt",
     "access_api_token_new_description": "Kopier tokenet nå. Det vises ikke igjen.",
     "access_api_token_new_title": "Nytt API-token",
+    "access_api_token_perm_display": "Skjerm",
+    "access_api_token_perm_display_description": "Endre EDID, som angir skjermen verten ser",
     "access_api_token_perm_input": "Inndata",
     "access_api_token_perm_input_description": "Tastatur, mus og Jiggler",
     "access_api_token_perm_media": "Virtuelle medier",

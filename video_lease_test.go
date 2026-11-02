@@ -65,6 +65,7 @@ func setUpLeaseTest(t *testing.T, sessions int) *leaseNative {
 		videoLeaseUntil = time.Time{}
 		videoPipelineRunning = false
 		videoPausedBy = nil
+		videoLeaseTookPauseFrom = nil
 		videoLeaseActive.Store(false)
 		videoPauseMu.Unlock()
 	}
@@ -165,6 +166,70 @@ func TestVideoLeaseTakesOverPauseOfSession(t *testing.T) {
 	videoPauseMu.Unlock()
 	if held != nil {
 		t.Fatal("the pause is still held")
+	}
+}
+
+func TestVideoLeaseHandsPauseBackOnExpiry(t *testing.T) {
+	rec := setUpLeaseTest(t, 1)
+	session := &Session{}
+	videoPauseMu.Lock()
+	videoPausedBy = session
+	videoPauseMu.Unlock()
+
+	if _, err := acquireVideoLease(); err != nil {
+		t.Fatal(err)
+	}
+	expireNow()
+	wantCalls(t, rec, "set-codec:0", "start", "stop")
+	videoPauseMu.Lock()
+	held := videoPausedBy
+	videoPauseMu.Unlock()
+	if held != session {
+		t.Fatal("the pause did not go back to its session")
+	}
+}
+
+func TestVideoLeaseKeepsPipelineWhenSessionResumedMeanwhile(t *testing.T) {
+	rec := setUpLeaseTest(t, 1)
+	session := &Session{}
+	videoPauseMu.Lock()
+	videoPausedBy = session
+	videoPauseMu.Unlock()
+
+	if _, err := acquireVideoLease(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rpcSetVideoStreamPaused(session, false); err != nil {
+		t.Fatal(err)
+	}
+	expireNow()
+	wantCalls(t, rec, "set-codec:0", "start")
+	videoPauseMu.Lock()
+	held := videoPausedBy
+	videoPauseMu.Unlock()
+	if held != nil {
+		t.Fatal("the pause came back although the session had resumed")
+	}
+}
+
+func TestVideoLeaseDropsPauseOfClosedSession(t *testing.T) {
+	rec := setUpLeaseTest(t, 1)
+	session := &Session{}
+	videoPauseMu.Lock()
+	videoPausedBy = session
+	videoPauseMu.Unlock()
+
+	if _, err := acquireVideoLease(); err != nil {
+		t.Fatal(err)
+	}
+	releaseVideoPause(session)
+	expireNow()
+	wantCalls(t, rec, "set-codec:0", "start")
+	videoPauseMu.Lock()
+	held := videoPausedBy
+	videoPauseMu.Unlock()
+	if held != nil {
+		t.Fatal("the pause went back to a closed session")
 	}
 }
 

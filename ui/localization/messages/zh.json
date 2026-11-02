@@ -22,6 +22,8 @@
     "access_api_token_never_used": "从未使用",
     "access_api_token_new_description": "请立即复制令牌。它不会再次显示。",
     "access_api_token_new_title": "新的 API 令牌",
+    "access_api_token_perm_display": "显示器",
+    "access_api_token_perm_display_description": "更改 EDID，用于设定主机识别到的显示器",
     "access_api_token_perm_input": "输入",
     "access_api_token_perm_input_description": "键盘、鼠标和鼠标防休眠",
     "access_api_token_perm_media": "虚拟介质",
