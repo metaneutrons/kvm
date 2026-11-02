@@ -22,6 +22,8 @@
     "access_api_token_never_used": "Aldrig använd",
     "access_api_token_new_description": "Kopiera token nu. Den visas inte igen.",
     "access_api_token_new_title": "Ny API-token",
+    "access_api_token_perm_display": "Skärm",
+    "access_api_token_perm_display_description": "Ändra EDID, som anger vilken skärm värden ser",
     "access_api_token_perm_input": "Inmatning",
     "access_api_token_perm_input_description": "Tangentbord, mus och Jiggler",
     "access_api_token_perm_media": "Virtuella medier",

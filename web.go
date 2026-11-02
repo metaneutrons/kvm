@@ -219,9 +219,9 @@ func setupRouter() *gin.Engine {
 		protected.GET("/diagnostics", handleDiagnosticsDownload)
 	}
 
-	// API routes for scripts and agents (login cookie, API token or password)
+	// API routes for scripts and agents (API token or password, not the login cookie)
 	api := r.Group("/api")
-	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
+	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware(false))
 	{
 		api.POST("/rpc", handleAPIRPC)
 		// Uploads start with the startStorageFileUpload RPC, which returns the

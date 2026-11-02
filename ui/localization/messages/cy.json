@@ -22,6 +22,8 @@
     "access_api_token_never_used": "Heb ei ddefnyddio erioed",
     "access_api_token_new_description": "Copïwch y tocyn nawr. Ni fydd yn cael ei ddangos eto.",
     "access_api_token_new_title": "Tocyn API Newydd",
+    "access_api_token_perm_display": "Arddangosfa",
+    "access_api_token_perm_display_description": "Newid yr EDID, sy'n pennu'r monitor y mae'r gwesteiwr yn ei weld",
     "access_api_token_perm_input": "Mewnbwn",
     "access_api_token_perm_input_description": "Bysellfwrdd, llygoden a Jiggler llygoden",
     "access_api_token_perm_media": "Cyfrwng Rhithwir",
