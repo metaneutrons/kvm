@@ -160,7 +160,8 @@ func migrateLegacyAPIToken(cfg *Config) bool {
 		return false
 	}
 	if !slices.ContainsFunc(cfg.APITokens, func(t APIToken) bool { return t.Hash == cfg.APITokenHash }) {
-		perms := permAll
+		// What the single token could do before the display permission existed.
+		perms := permView | permInput | permMedia | permPower
 		if cfg.APITokenScope == "view" {
 			perms = permView
 		}

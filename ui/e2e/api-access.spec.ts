@@ -52,7 +52,7 @@ test.describe("API access", () => {
   test("a token cannot manage tokens or reach the UI", async ({ page }) => {
     const { token } = await createApiToken(page, {
       name: `${TEST_TOKEN_PREFIX}full`,
-      permissions: ["input", "media", "power"],
+      permissions: ["input", "media", "power", "display"],
     });
     for (const [method, path] of [
       ["GET", "/auth/api-tokens"],
@@ -69,10 +69,11 @@ test.describe("API access", () => {
     // Only requests that must be refused are sent with a limited token: an
     // allowed one would act on the host.
     const cases: { permissions: string[]; refused: string[] }[] = [
-      { permissions: [], refused: ["keypressReport", "mountWithHTTP", "setATXPowerAction"] },
-      { permissions: ["input"], refused: ["mountWithHTTP", "unmountImage", "wakeHost"] },
-      { permissions: ["media"], refused: ["keypressReport", "setJigglerState", "setDCPowerState"] },
-      { permissions: ["power"], refused: ["keyboardReport", "wheelReport", "mountWithStorage"] },
+      { permissions: [], refused: ["keypressReport", "mountWithHTTP", "setEDID"] },
+      { permissions: ["input"], refused: ["mountWithHTTP", "wakeHost", "setEDID"] },
+      { permissions: ["media"], refused: ["keypressReport", "setDCPowerState", "setEDID"] },
+      { permissions: ["power"], refused: ["keyboardReport", "mountWithStorage", "setEDID"] },
+      { permissions: ["display"], refused: ["keyboardReport", "mountWithStorage", "wakeHost"] },
     ];
     for (const { permissions, refused } of cases) {
       const { token } = await createApiToken(page, {

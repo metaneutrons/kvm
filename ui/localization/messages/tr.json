@@ -22,6 +22,8 @@
     "access_api_token_never_used": "Hiç kullanılmadı",
     "access_api_token_new_description": "Belirteci şimdi kopyalayın. Tekrar gösterilmeyecek.",
     "access_api_token_new_title": "Yeni API Belirteci",
+    "access_api_token_perm_display": "Ekran",
+    "access_api_token_perm_display_description": "Ana bilgisayarın gördüğü monitörü belirleyen EDID'i değiştirme",
     "access_api_token_perm_input": "Girdi",
     "access_api_token_perm_input_description": "Klavye, fare ve Mouse Jiggler",
     "access_api_token_perm_media": "Sanal medya",

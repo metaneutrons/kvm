@@ -22,6 +22,8 @@
     "access_api_token_never_used": "未使用",
     "access_api_token_new_description": "今すぐトークンをコピーしてください。再表示されません。",
     "access_api_token_new_title": "新しいAPIトークン",
+    "access_api_token_perm_display": "ディスプレイ",
+    "access_api_token_perm_display_description": "ホストが認識するモニターを決めるEDIDの変更",
     "access_api_token_perm_input": "入力",
     "access_api_token_perm_input_description": "キーボード、マウス、マウスジグラー",
     "access_api_token_perm_media": "仮想メディア",

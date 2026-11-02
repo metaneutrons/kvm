@@ -14,7 +14,7 @@ import notifications from "@/notifications";
 import { DEVICE_API } from "@/ui.config";
 import { m } from "@localizations/messages.js";
 
-type ApiPermission = "view" | "input" | "media" | "power";
+type ApiPermission = "view" | "input" | "media" | "power" | "display";
 type OptionalPermission = Exclude<ApiPermission, "view">;
 
 interface ApiTokenInfo {
@@ -46,6 +46,8 @@ function permissionLabel(permission: ApiPermission) {
       return m.access_api_token_perm_media();
     case "power":
       return m.access_api_token_perm_power();
+    case "display":
+      return m.access_api_token_perm_display();
   }
 }
 
@@ -59,6 +61,8 @@ function permissionDescription(permission: ApiPermission) {
       return m.access_api_token_perm_media_description();
     case "power":
       return m.access_api_token_perm_power_description();
+    case "display":
+      return m.access_api_token_perm_display_description();
   }
 }
 
@@ -300,7 +304,7 @@ export default function ApiTokenSettings({ passwordMode }: { passwordMode: boole
                     disabled
                     readOnly
                   />
-                  {(["input", "media", "power"] as const).map(permission => (
+                  {(["input", "media", "power", "display"] as const).map(permission => (
                     <CheckboxWithLabel
                       key={permission}
                       label={permissionLabel(permission)}

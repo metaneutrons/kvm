@@ -43,6 +43,7 @@ what it needs:
 | Input | Keyboard, mouse and the mouse jiggler. | `move_mouse`, `click`, `drag`, `scroll`, `press_keys`, `type_text`, `set_jiggler`, `set_keyboard_layout` |
 | Virtual media | Mounting and unmounting images, uploading files. | `mount_media`, `unmount_media` |
 | Power | ATX and DC power, Wake-on-LAN and the USB wake-up. | `control_power`, `wake_host` |
+| Display | Changing the EDID, which sets the monitor the host sees. | none |
 
 A call without the permission is refused, and an MCP connection only lists the
 tools its token covers. Input is close to full control of the host: anyone who
@@ -57,7 +58,7 @@ The rest of the API keeps working. The switch is also there when the JetKVM
 runs without a password, where it is the only way to close MCP.
 
 Tokens from an earlier version are kept: the single token becomes an entry
-named "API token", with all permissions or view only, as it was.
+named "API token", with the permissions it had (all but Display, or view only).
 
 ### Using the password
 
@@ -69,9 +70,9 @@ count towards the same rate limit as tokens and logins, and while HTTPS is on,
 the password is refused over plain HTTP just like a token. The API sends no
 `WWW-Authenticate` header, so a browser does not ask for a password.
 
-Requests from a browser that is logged in to the web UI also pass, as long as
-they come from the JetKVM's own pages. Requests that other websites make the
-browser send are rejected.
+Requests that other websites make the browser send are rejected. A browser that
+is logged in to the web UI may fetch the screenshot, but no other route, with
+its login cookie.
 
 If the JetKVM runs without a password, `/api` is open to everyone on the
 network, like the web UI.
@@ -220,8 +221,9 @@ Points to know:
 
 ### `GET /api/video/snapshot`
 
-Returns the current frame as JPEG and starts video capture if needed. Optional
-query parameters:
+Returns the current frame as JPEG and starts video capture if needed. Besides a
+token or the password, it accepts the login cookie, so a logged-in browser tab
+can show it. Optional query parameters:
 
 | Parameter | Meaning |
 |---|---|
@@ -234,15 +236,17 @@ display sleeps.
 
 ### `POST /api/rpc`
 
-Calls a JSON-RPC 2.0 method, for example:
+Calls a JSON-RPC 2.0 method with a token or the password. The login cookie is
+not accepted here, nor on `/api/mcp` and the upload: the web UI talks to the
+device over WebRTC and has no use for it. For example:
 
 ```bash
 curl -H "Authorization: Bearer jkvm_…" -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"getVideoState"}' https://<your-jetkvm>/api/rpc
 ```
 
-Allowed are state queries, keyboard and mouse input, virtual media, Wake-on-LAN
-and power. Device administration (network, updates, SSH keys, developer mode,
+Allowed are state queries, keyboard and mouse input, virtual media, Wake-on-LAN,
+power and the EDID. Device administration (network, updates, SSH keys, developer mode,
 factory reset) is left to the web UI, so a leaked token cannot take over the
 JetKVM itself.
 
