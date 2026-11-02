@@ -22,6 +22,8 @@
     "access_api_token_never_used": "Jamais utilisé",
     "access_api_token_new_description": "Copiez le jeton maintenant. Il ne sera plus affiché.",
     "access_api_token_new_title": "Nouveau jeton d'API",
+    "access_api_token_perm_display": "Écran",
+    "access_api_token_perm_display_description": "Modifier l'EDID, qui définit l'écran vu par l'hôte",
     "access_api_token_perm_input": "Saisie",
     "access_api_token_perm_input_description": "Clavier, souris et Jiggler",
     "access_api_token_perm_media": "Médias virtuels",

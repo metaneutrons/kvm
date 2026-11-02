@@ -232,9 +232,9 @@ func setupRouter() *gin.Engine {
 		protected.GET("/diagnostics", handleDiagnosticsDownload)
 	}
 
-	// API routes for scripts and agents (login cookie or API token)
+	// API routes for scripts and agents (API token or password, not the login cookie)
 	api := r.Group("/api")
-	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
+	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware(false))
 	{
 		api.GET("/video/snapshot", handleVideoSnapshot)
 		api.POST("/rpc", handleAPIRPC)
