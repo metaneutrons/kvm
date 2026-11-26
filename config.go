@@ -107,6 +107,7 @@ type Config struct {
 	APITokenCreatedAt    string               `json:"api_token_created_at,omitempty"`
 	APITokenScope        string               `json:"api_token_scope,omitempty"`
 	LocalAuthMode        string               `json:"localAuthMode"` //TODO: fix it with migration
+	LocalAuthIdleMinutes int                  `json:"local_auth_idle_minutes"`
 	LocalLoopbackOnly    bool                 `json:"local_loopback_only"`
 	WakeOnLanDevices     []WakeOnLanDevice    `json:"wake_on_lan_devices"`
 	KeyboardMacros       []KeyboardMacro      `json:"keyboard_macros"`
@@ -129,6 +130,7 @@ type Config struct {
 	NativeMaxRestart     uint                 `json:"native_max_restart_attempts"`
 	MqttConfig           *MQTTConfig          `json:"mqtt_config"`
 	AudioEnabled         bool                 `json:"audio_enabled"`
+	OSServices           *OSServicesConfig    `json:"os_services"`
 }
 
 // GetUpdateAPIURL returns the update API URL
@@ -160,7 +162,7 @@ func (c *Config) SetDisplayRotation(rotation string) error {
 	return nil
 }
 
-const configPath = "/userdata/kvm_config.json"
+var configPath = "/userdata/kvm_config.json"
 
 // it's a temporary solution to avoid sharing the same pointer
 // we should migrate to a proper config solution in the future
@@ -172,11 +174,12 @@ var (
 		Timezone:               "UTC",
 	}
 	defaultUsbConfig = usbgadget.Config{
-		VendorId:     "0x1d6b", //The Linux Foundation
-		ProductId:    "0x0104", //Multifunction Composite Gadget
-		SerialNumber: "",
-		Manufacturer: "JetKVM",
-		Product:      "USB Emulation Device",
+		VendorId:      "0x1d6b", //The Linux Foundation
+		ProductId:     "0x0104", //Multifunction Composite Gadget
+		SerialNumber:  "",
+		Manufacturer:  "JetKVM",
+		Product:       "USB Emulation Device",
+		Configuration: "Config 1: HID",
 	}
 	defaultUsbDevices = usbgadget.Devices{
 		AbsoluteMouse: true,
@@ -206,6 +209,7 @@ func getDefaultConfig() Config {
 		TLSMode:       "",
 		UsbConfig:     func() *usbgadget.Config { c := defaultUsbConfig; return &c }(),
 		UsbDevices:    func() *usbgadget.Devices { c := defaultUsbDevices; return &c }(),
+		OSServices:    defaultOSServicesConfig(),
 		NetworkConfig: func() *types.NetworkConfig {
 			c := &types.NetworkConfig{}
 			_ = confparser.SetDefaultsAndValidate(c)
@@ -295,6 +299,10 @@ func LoadConfig() {
 
 	if !loadedConfig.UsbDevices.Audio {
 		loadedConfig.AudioEnabled = false
+	}
+
+	if loadedConfig.OSServices == nil {
+		loadedConfig.OSServices = defaultOSServicesConfig()
 	}
 
 	if loadedConfig.NetworkConfig == nil {

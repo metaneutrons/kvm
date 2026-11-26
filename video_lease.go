@@ -29,7 +29,8 @@ const (
 )
 
 var (
-	errVideoPaused = errors.New("video is paused while a virtual media upload runs; try again when it has finished")
+	errVideoPaused            = errors.New("video is paused while a virtual media upload runs; try again when it has finished")
+	errVideoOwnedByOSServices = errors.New("HDMI video is unavailable while OS Services video owns the display")
 
 	// videoLeaseActive is readable without videoPauseMu for the display
 	// advertisement and the sleep timer, which hold other locks.
@@ -79,12 +80,16 @@ func markVideoPipelineStopped() {
 // acquireVideoLease extends the lease and starts the pipeline if nothing runs
 // it. A pause that a web session holds, for example while its media dialog is
 // open, does not keep the lease out: the agent takes it over, as an open
-// browser tab must not block it. Only a running upload, which needs the
-// memory the pipeline would use, makes it wait. It reports whether the host display was advertised again, in which case
-// the host needs a few seconds before it sends a picture.
+// browser tab must not block it. A running upload or OS Services video
+// ownership prevents acquisition. It reports whether the host display was
+// advertised again, in which case the host needs time to send a picture.
 func acquireVideoLease() (displayWoken bool, err error) {
 	videoPauseMu.Lock()
 	defer videoPauseMu.Unlock()
+
+	if osServicesOwnsVideo() {
+		return false, errVideoOwnedByOSServices
+	}
 
 	if videoPausedBy != nil {
 		if uploadInProgress() {
@@ -127,18 +132,20 @@ func expireVideoLease() {
 	}
 	videoLeaseTimer = nil
 	videoLeaseActive.Store(false)
-	stopped := false
-	if videoPipelineRunning && getActiveSessions() == 0 {
+	idle := getActiveSessions() == 0
+	stopped := videoPipelineRunning && idle
+	if stopped {
 		nativeLogger.Info().Msg("video lease expired, stopping video")
 		_ = stopVideoPipelineLocked()
-		stopped = true
 	}
 	videoPauseMu.Unlock()
 
-	if stopped {
-		// Both read the session count themselves, so a session that connected
-		// since the stop is handled correctly.
+	if idle {
+		// OS Services may have stopped capture while the lease still kept
+		// the display advertised.
 		_ = applyHostDisplayAdvertisement("video_lease_expired")
+	}
+	if stopped {
 		startVideoSleepModeTicker()
 	}
 }

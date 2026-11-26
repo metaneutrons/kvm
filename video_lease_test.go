@@ -1,4 +1,4 @@
-//go:build linux && arm
+//go:build linux
 
 package kvm
 
@@ -85,6 +85,9 @@ func setUpLeaseTest(t *testing.T, sessions int) *leaseNative {
 // expireNow makes the lease due and runs the expiry as the timer would.
 func expireNow() {
 	videoPauseMu.Lock()
+	if videoLeaseTimer != nil {
+		videoLeaseTimer.Stop()
+	}
 	videoLeaseUntil = time.Now().Add(-time.Second)
 	videoPauseMu.Unlock()
 	expireVideoLease()
@@ -181,6 +184,31 @@ func TestVideoLeaseKeepsPipelineAfterLastSession(t *testing.T) {
 	wantCalls(t, rec, "set-codec:0", "start")
 
 	expireNow()
+	wantCalls(t, rec, "set-codec:0", "start", "stop")
+}
+
+func TestOSServicesVideoTakesPriorityOverLease(t *testing.T) {
+	rec := setUpLeaseTest(t, 0)
+	originalOSServices := osServices
+	osServices = &osServicesService{}
+	t.Cleanup(func() { osServices = originalOSServices })
+	config.HideDisplayWhenIdle = true
+
+	if _, err := acquireVideoLease(); err != nil {
+		t.Fatal(err)
+	}
+	osServices.video.owned.Store(true)
+	stopNativeVideo()
+
+	if _, err := acquireVideoLease(); !errors.Is(err, errVideoOwnedByOSServices) {
+		t.Fatalf("err = %v, want errVideoOwnedByOSServices", err)
+	}
+	osServices.video.owned.Store(false)
+	expireNow()
+
+	if isHostDisplayAdvertised() {
+		t.Fatal("the display is still advertised after the preempted lease expired")
+	}
 	wantCalls(t, rec, "set-codec:0", "start", "stop")
 }
 

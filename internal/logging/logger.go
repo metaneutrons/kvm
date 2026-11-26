@@ -83,7 +83,8 @@ var (
 		"diagnostics": zerolog.InfoLevel,
 		"supervisor":  zerolog.InfoLevel,
 		// what scripts and AI agents did through the API
-		"api": zerolog.InfoLevel,
+		"api":         zerolog.InfoLevel,
+		"os_services": zerolog.InfoLevel,
 	}
 )
 
