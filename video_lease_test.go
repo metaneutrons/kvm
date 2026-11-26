@@ -1,4 +1,4 @@
-//go:build linux && arm
+//go:build linux
 
 package kvm
 
@@ -181,6 +181,24 @@ func TestVideoLeaseKeepsPipelineAfterLastSession(t *testing.T) {
 	wantCalls(t, rec, "set-codec:0", "start")
 
 	expireNow()
+	wantCalls(t, rec, "set-codec:0", "start", "stop")
+}
+
+func TestOSServicesVideoTakesPriorityOverLease(t *testing.T) {
+	rec := setUpLeaseTest(t, 0)
+	originalOSServices := osServices
+	osServices = &osServicesService{}
+	t.Cleanup(func() { osServices = originalOSServices })
+
+	if _, err := acquireVideoLease(); err != nil {
+		t.Fatal(err)
+	}
+	osServices.video.owned.Store(true)
+	stopNativeVideo()
+
+	if _, err := acquireVideoLease(); !errors.Is(err, errVideoOwnedByOSServices) {
+		t.Fatalf("err = %v, want errVideoOwnedByOSServices", err)
+	}
 	wantCalls(t, rec, "set-codec:0", "start", "stop")
 }
 
