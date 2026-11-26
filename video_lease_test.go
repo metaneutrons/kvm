@@ -189,6 +189,7 @@ func TestOSServicesVideoTakesPriorityOverLease(t *testing.T) {
 	originalOSServices := osServices
 	osServices = &osServicesService{}
 	t.Cleanup(func() { osServices = originalOSServices })
+	config.HideDisplayWhenIdle = true
 
 	if _, err := acquireVideoLease(); err != nil {
 		t.Fatal(err)
@@ -198,6 +199,12 @@ func TestOSServicesVideoTakesPriorityOverLease(t *testing.T) {
 
 	if _, err := acquireVideoLease(); !errors.Is(err, errVideoOwnedByOSServices) {
 		t.Fatalf("err = %v, want errVideoOwnedByOSServices", err)
+	}
+	osServices.video.owned.Store(false)
+	expireNow()
+
+	if isHostDisplayAdvertised() {
+		t.Fatal("the display is still advertised after the preempted lease expired")
 	}
 	wantCalls(t, rec, "set-codec:0", "start", "stop")
 }

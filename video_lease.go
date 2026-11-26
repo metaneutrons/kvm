@@ -132,18 +132,20 @@ func expireVideoLease() {
 	}
 	videoLeaseTimer = nil
 	videoLeaseActive.Store(false)
-	stopped := false
-	if videoPipelineRunning && getActiveSessions() == 0 {
+	idle := getActiveSessions() == 0
+	stopped := videoPipelineRunning && idle
+	if stopped {
 		nativeLogger.Info().Msg("video lease expired, stopping video")
 		_ = stopVideoPipelineLocked()
-		stopped = true
 	}
 	videoPauseMu.Unlock()
 
-	if stopped {
-		// Both read the session count themselves, so a session that connected
-		// since the stop is handled correctly.
+	if idle {
+		// OS Services may have stopped capture while the lease still kept
+		// the display advertised.
 		_ = applyHostDisplayAdvertisement("video_lease_expired")
+	}
+	if stopped {
 		startVideoSleepModeTicker()
 	}
 }
