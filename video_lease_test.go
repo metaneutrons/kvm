@@ -85,6 +85,9 @@ func setUpLeaseTest(t *testing.T, sessions int) *leaseNative {
 // expireNow makes the lease due and runs the expiry as the timer would.
 func expireNow() {
 	videoPauseMu.Lock()
+	if videoLeaseTimer != nil {
+		videoLeaseTimer.Stop()
+	}
 	videoLeaseUntil = time.Now().Add(-time.Second)
 	videoPauseMu.Unlock()
 	expireVideoLease()

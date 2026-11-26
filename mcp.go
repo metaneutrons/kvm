@@ -1068,7 +1068,7 @@ func runKeyStrokes(strokes []keyboard.Stroke, hold time.Duration) error {
 			hidrpc.KeyboardMacroStep{Keys: make([]byte, hidrpc.HidKeyBufferSize), Delay: uint16(mcpKeyDelay.Milliseconds())},
 		)
 	}
-	return rpcExecuteKeyboardMacro(steps)
+	return rpcExecuteKeyboardMacro(nil, steps)
 }
 
 type mcpPressKeysInput struct {
