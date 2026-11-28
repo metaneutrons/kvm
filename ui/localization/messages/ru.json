@@ -22,6 +22,8 @@
     "access_api_token_never_used": "Не использовался",
     "access_api_token_new_description": "Скопируйте токен сейчас. Он больше не будет показан.",
     "access_api_token_new_title": "Новый API-токен",
+    "access_api_token_perm_display": "Дисплей",
+    "access_api_token_perm_display_description": "Изменение EDID, определяющего монитор, который видит хост",
     "access_api_token_perm_input": "Ввод",
     "access_api_token_perm_input_description": "Клавиатура, мышь и Jiggler",
     "access_api_token_perm_media": "Виртуальный носитель",

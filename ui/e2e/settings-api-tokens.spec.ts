@@ -62,6 +62,30 @@ test.describe("API token settings", () => {
     expect((await apiRpc(bearer(token), "ping")).status).toBe(401);
   });
 
+  test("offers the display permission and keeps it off by default", async ({ page }) => {
+    const create = page.getByRole("button", { name: "Create Token" });
+    const display = page.getByRole("checkbox", { name: /^Display/ });
+    await page.getByPlaceholder("e.g. Home Assistant").fill(NAME);
+
+    // Every permission is off until it is ticked.
+    await expect(display).toBeVisible();
+    await expect(display).not.toBeChecked();
+    for (const name of [/^Input/, /^Virtual media/, /^Power/]) {
+      await expect(page.getByRole("checkbox", { name })).not.toBeChecked();
+    }
+
+    await display.check();
+    await create.click();
+    await expect(page.getByText(/^jkvm_[A-Za-z0-9_-]{40,}$/)).toBeVisible();
+
+    const row = page.locator("div.py-3", { hasText: NAME });
+    await expect(row.getByText("Display", { exact: true })).toBeVisible();
+    await expect(row.getByText("Input", { exact: true })).toHaveCount(0);
+
+    const listed = (await listApiTokens(page)).tokens.find(t => t.name === NAME);
+    expect(listed?.permissions).toEqual(["view", "display"]);
+  });
+
   test("turns the MCP server off and on", async ({ page }) => {
     const mcp = page.locator("label", { hasText: "MCP Server" }).getByRole("checkbox");
     await expect(mcp).toBeChecked();

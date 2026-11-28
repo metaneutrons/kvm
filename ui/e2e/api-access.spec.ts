@@ -52,7 +52,7 @@ test.describe("API access", () => {
   test("a token cannot manage tokens or reach the UI", async ({ page }) => {
     const { token } = await createApiToken(page, {
       name: `${TEST_TOKEN_PREFIX}full`,
-      permissions: ["input", "media", "power"],
+      permissions: ["input", "media", "power", "display"],
     });
     for (const [method, path] of [
       ["GET", "/auth/api-tokens"],
@@ -69,10 +69,23 @@ test.describe("API access", () => {
     // Only requests that must be refused are sent with a limited token: an
     // allowed one would act on the host.
     const cases: { permissions: string[]; refused: string[] }[] = [
-      { permissions: [], refused: ["keypressReport", "mountWithHTTP", "setATXPowerAction"] },
-      { permissions: ["input"], refused: ["mountWithHTTP", "unmountImage", "wakeHost"] },
-      { permissions: ["media"], refused: ["keypressReport", "setJigglerState", "setDCPowerState"] },
-      { permissions: ["power"], refused: ["keyboardReport", "wheelReport", "mountWithStorage"] },
+      {
+        permissions: [],
+        refused: ["keypressReport", "runKeyboardMacro", "mountWithHTTP", "setEDID"],
+      },
+      { permissions: ["input"], refused: ["mountWithHTTP", "wakeHost", "setEDID"] },
+      {
+        permissions: ["media"],
+        refused: ["keypressReport", "runKeyboardMacro", "setDCPowerState", "setEDID"],
+      },
+      {
+        permissions: ["power"],
+        refused: ["keyboardReport", "runKeyboardMacro", "mountWithStorage", "setEDID"],
+      },
+      {
+        permissions: ["display"],
+        refused: ["keyboardReport", "runKeyboardMacro", "mountWithStorage", "wakeHost"],
+      },
     ];
     for (const { permissions, refused } of cases) {
       const { token } = await createApiToken(page, {
@@ -97,6 +110,75 @@ test.describe("API access", () => {
         expect(res.error?.code, method).toBe(METHOD_NOT_FOUND);
       }
     }
+  });
+
+  test("an input token may run a stored macro, other tokens may not", async ({ page }) => {
+    // A name that no macro has: the call passes the permission check and then
+    // fails on the lookup, so nothing is typed on the host.
+    const unknown = "e2e-no-such-macro";
+    const input = await createApiToken(page, {
+      name: `${TEST_TOKEN_PREFIX}macro-input`,
+      permissions: ["input"],
+    });
+    const media = await createApiToken(page, {
+      name: `${TEST_TOKEN_PREFIX}macro-media`,
+      permissions: ["media"],
+    });
+
+    const allowed = await apiRpc(bearer(input.token), "runKeyboardMacro", { macro: unknown });
+    expect(allowed.error?.code).not.toBe(NO_PERMISSION);
+    expect(String(allowed.error?.data)).toContain("unknown keyboard macro");
+
+    const refused = await apiRpc(bearer(media.token), "runKeyboardMacro", { macro: unknown });
+    expect(refused.error?.code).toBe(NO_PERMISSION);
+
+    // Macros can hold typed credentials, so a token cannot read them.
+    const read = await apiRpc(bearer(input.token), "getKeyboardMacros");
+    expect(read.error?.code).toBe(METHOD_NOT_FOUND);
+  });
+
+  test("the display permission lets a token set the EDID", async ({ page }) => {
+    const view = await createApiToken(page, { name: `${TEST_TOKEN_PREFIX}view` });
+    const display = await createApiToken(page, {
+      name: `${TEST_TOKEN_PREFIX}display`,
+      permissions: ["display"],
+    });
+    expect(display.info.permissions).toEqual(["view", "display"]);
+
+    // Reading the EDID is open to every token.
+    const current = await apiRpc(bearer(view.token), "getEDID");
+    expect(current.status).toBe(200);
+    expect(typeof current.result).toBe("string");
+    const edid = current.result as string;
+
+    expect((await apiRpc(bearer(view.token), "setEDID", { edid })).error?.code).toBe(NO_PERMISSION);
+
+    // The same EDID goes back in, so the host sees no other monitor.
+    const set = await apiRpc(bearer(display.token), "setEDID", { edid });
+    expect(set.status).toBe(200);
+    expect(set.error).toBeUndefined();
+    expect(((await apiRpc(bearer(view.token), "getEDID")).result as string).toLowerCase()).toBe(
+      edid.toLowerCase(),
+    );
+  });
+
+  test("the login cookie does not open the RPC, MCP and upload endpoints", async ({ page }) => {
+    // page carries the login cookie, and its requests have no foreign origin.
+    const rpc = await page.request.post("/api/rpc", { data: PING });
+    expect(rpc.status()).toBe(401);
+
+    const mcp = await page.request.post("/api/mcp", {
+      headers: { Accept: "application/json, text/event-stream" },
+      data: { jsonrpc: "2.0", method: "tools/list", id: 1 },
+    });
+    expect(mcp.status()).toBe(401);
+
+    const upload = await page.request.post("/api/storage/upload?uploadId=none");
+    expect(upload.status()).toBe(401);
+
+    // The same page does pass with a token, so the 401 is about the cookie.
+    const { token } = await createApiToken(page, { name: `${TEST_TOKEN_PREFIX}view` });
+    expect((await apiRpc(bearer(token), "ping")).status).toBe(200);
   });
 
   test("an upload needs the media permission", async ({ page }) => {

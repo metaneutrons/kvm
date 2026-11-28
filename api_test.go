@@ -23,6 +23,9 @@ import (
 
 func TestAPIRPCMethodsExistAndNeedNoSession(t *testing.T) {
 	sessionType := reflect.TypeOf((*Session)(nil))
+	// Handlers that take a *Session and run without one, as they do for MQTT
+	// and MCP: rpcExecuteKeyboardMacro and Session.input accept nil.
+	nilSessionOK := map[string]bool{"runKeyboardMacro": true}
 	for method := range apiRPCMethods {
 		handler, ok := rpcHandlers[method]
 		if !ok {
@@ -30,7 +33,7 @@ func TestAPIRPCMethodsExistAndNeedNoSession(t *testing.T) {
 			continue
 		}
 		fn := reflect.TypeOf(handler.Func)
-		if fn.NumIn() > 0 && fn.In(0) == sessionType {
+		if fn.NumIn() > 0 && fn.In(0) == sessionType && !nilSessionOK[method] {
 			t.Errorf("%s needs a WebRTC session, which an API call does not have", method)
 		}
 	}
@@ -39,7 +42,7 @@ func TestAPIRPCMethodsExistAndNeedNoSession(t *testing.T) {
 // setUpAPITest configures one token with all permissions.
 func setUpAPITest(t *testing.T) string {
 	t.Helper()
-	return setUpAPITestPerms(t, "view", "input", "media", "power")
+	return setUpAPITestPerms(t, "view", "input", "media", "power", "display")
 }
 
 func setUpAPITestPerms(t *testing.T, perms ...string) string {
@@ -166,8 +169,8 @@ func TestMigrateLegacyAPIToken(t *testing.T) {
 	if cfg.APITokenHash != "" || len(cfg.APITokens) != 1 {
 		t.Fatalf("config after migration: %+v", cfg)
 	}
-	if got := cfg.APITokens[0].perms(); got != permAll {
-		t.Errorf("a token without scope has %v, want all permissions", got)
+	if got, want := cfg.APITokens[0].perms(), permView|permInput|permMedia|permPower; got != want {
+		t.Errorf("a token without scope has %v, want the permissions it had before the display one", got)
 	}
 	if migrateLegacyAPIToken(cfg) {
 		t.Error("migrated twice")
@@ -184,9 +187,13 @@ func newAPITestRouter() *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	api := r.Group("/api")
-	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware())
+	api.Use(apiCrossOriginMiddleware, apiAuthMiddleware(false))
 	api.POST("/rpc", handleAPIRPC)
 	api.POST("/storage/upload", requirePerm(permMedia), handleUploadHttp)
+	// A route that a logged-in page may fetch itself, like the screenshot.
+	session := r.Group("/api/session")
+	session.Use(apiCrossOriginMiddleware, apiAuthMiddleware(true))
+	session.POST("/ping", func(c *gin.Context) { c.Status(http.StatusOK) })
 	protected := r.Group("/")
 	protected.Use(protectedMiddleware())
 	protected.GET("/device", func(c *gin.Context) { c.Status(http.StatusOK) })
@@ -219,7 +226,10 @@ func TestAPIAuthMiddleware(t *testing.T) {
 		{"no credentials", "/api/rpc", "", "", http.StatusUnauthorized},
 		{"api token", "/api/rpc", token, "", http.StatusOK},
 		{"wrong api token", "/api/rpc", apiTokenPrefix + "wrong", "", http.StatusUnauthorized},
-		{"login cookie", "/api/rpc", "", "cookie-token", http.StatusOK},
+		{"login cookie on the RPC route", "/api/rpc", "", "cookie-token", http.StatusUnauthorized},
+		{"login cookie on a route for pages", "/api/session/ping", "", "cookie-token", http.StatusOK},
+		{"api token on a route for pages", "/api/session/ping", token, "", http.StatusOK},
+		{"no credentials on a route for pages", "/api/session/ping", "", "", http.StatusUnauthorized},
 		{"api token on a UI route", "/device", token, "", http.StatusUnauthorized},
 		// The token reaches the upload handler, which knows no such upload.
 		{"api token for an upload", "/api/storage/upload?uploadId=none", token, "", http.StatusNotFound},
@@ -296,10 +306,11 @@ func TestAPITokenPermissions(t *testing.T) {
 		perms  []string
 		denied []string
 	}{
-		{[]string{"view"}, []string{"keypressReport", "setJigglerState", "mountWithHTTP", "setATXPowerAction", "wakeHost"}},
-		{[]string{"input"}, []string{"mountWithHTTP", "unmountImage", "setATXPowerAction", "sendWOLMagicPacket", "wakeHost"}},
-		{[]string{"media"}, []string{"keypressReport", "absMouseReport", "setDCPowerState"}},
-		{[]string{"power"}, []string{"keyboardReport", "wheelReport", "mountWithStorage"}},
+		{[]string{"view"}, []string{"keypressReport", "runKeyboardMacro", "setJigglerState", "mountWithHTTP", "setATXPowerAction", "wakeHost", "setEDID"}},
+		{[]string{"input"}, []string{"mountWithHTTP", "unmountImage", "setATXPowerAction", "sendWOLMagicPacket", "wakeHost", "setEDID"}},
+		{[]string{"media"}, []string{"keypressReport", "runKeyboardMacro", "absMouseReport", "setDCPowerState", "setEDID"}},
+		{[]string{"power"}, []string{"keyboardReport", "runKeyboardMacro", "absMouseReport", "mountWithStorage", "setEDID"}},
+		{[]string{"display"}, []string{"keyboardReport", "runKeyboardMacro", "mountWithHTTP", "setATXPowerAction", "wakeHost"}},
 	}
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.perms, "+"), func(t *testing.T) {
@@ -332,9 +343,9 @@ func TestAPIUploadNeedsMedia(t *testing.T) {
 			t.Errorf("upload with %s: status %d, want %d", perms, w.Code, want)
 		}
 	}
-	// The login cookie keeps all permissions.
-	if w := doAPIRequest(r, http.MethodPost, "/api/storage/upload?uploadId=none", "", "", "cookie-token"); w.Code != http.StatusNotFound {
-		t.Errorf("upload with the login cookie: status %d, want 404", w.Code)
+	// The login cookie is no API credential.
+	if w := doAPIRequest(r, http.MethodPost, "/api/storage/upload?uploadId=none", "", "", "cookie-token"); w.Code != http.StatusUnauthorized {
+		t.Errorf("upload with the login cookie: status %d, want 401", w.Code)
 	}
 }
 

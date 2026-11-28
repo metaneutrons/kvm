@@ -15,8 +15,8 @@ import (
 )
 
 // A token carries a set of permissions. Viewing the screen and reading state
-// is part of every token; input, virtual media and power control are added
-// one by one, so a token only has what its client needs. The login cookie has
+// is part of every token; input, virtual media, power control and the display
+// are added one by one, so a token only has what its client needs. The login cookie has
 // all of them.
 type apiPerm uint8
 
@@ -25,8 +25,9 @@ const (
 	permInput
 	permMedia
 	permPower
+	permDisplay
 
-	permAll = permView | permInput | permMedia | permPower
+	permAll = permView | permInput | permMedia | permPower | permDisplay
 )
 
 var apiPermNames = []struct {
@@ -37,6 +38,7 @@ var apiPermNames = []struct {
 	{permInput, "input"},
 	{permMedia, "media"},
 	{permPower, "power"},
+	{permDisplay, "display"},
 }
 
 func (p apiPerm) names() []string {
@@ -76,8 +78,9 @@ type apiGrant struct {
 
 type apiGrantKey struct{}
 
-// apiGrantFrom returns the grant of the request's credentials. Without a
-// token the request came with the login cookie, which has all permissions.
+// apiGrantFrom returns the grant of the request's credentials. A request that
+// passed on the login cookie, or on no credentials because the device has no
+// password, has all permissions.
 func apiGrantFrom(ctx context.Context) apiGrant {
 	if grant, ok := ctx.Value(apiGrantKey{}).(apiGrant); ok {
 		return grant
@@ -100,16 +103,18 @@ func requirePerm(perm apiPerm) gin.HandlerFunc {
 	}
 }
 
-// The routes under /api are meant for scripts and agents. Besides the login
-// cookie they accept an API token as "Authorization: Bearer <token>". Tokens
-// are generated on the device, shown once and stored only as a SHA-256 hash;
-// without any, bearer authentication is off. A token is valid for /api only,
-// not for the UI routes, password changes or WebRTC signaling.
+// The routes under /api are meant for scripts and agents. They accept an API
+// token as "Authorization: Bearer <token>" or the device password as HTTP
+// Basic Auth, and a few that a logged-in page fetches itself the login cookie
+// as well. Tokens are generated on the device, shown once and stored only as a
+// SHA-256 hash; without any, bearer authentication is off. A token is valid
+// for /api only, not for the UI routes, password changes or WebRTC signaling.
 
 const apiTokenPrefix = "jkvm_"
 
 // apiRPCMethods are the JSON-RPC methods /api/rpc may call, with the
-// permission each needs: state queries, input, virtual media and power.
+// permission each needs: state queries, input, virtual media, power and the
+// display the host sees.
 // Device administration (developer mode, SSH keys, TLS, cloud, network,
 // updates, factory reset) stays with the UI, so a leaked token cannot take
 // over the JetKVM itself. Methods that need a WebRTC session are not listed,
@@ -123,6 +128,7 @@ var apiRPCMethods = map[string]apiPerm{
 	"getVideoState":         permView,
 	"getUSBState":           permView,
 	"getEDID":               permView,
+	"getEDIDPresets":        permView,
 	"getKeyboardLayout":     permView,
 	"getKeyboardLedState":   permView,
 	"getKeyDownState":       permView,
@@ -136,12 +142,12 @@ var apiRPCMethods = map[string]apiPerm{
 	"getDCPowerState":       permView,
 	"getWakeOnLanDevices":   permView,
 
-	"keyboardReport":  permInput,
-	"keypressReport":  permInput,
-	"absMouseReport":  permInput,
-	"relMouseReport":  permInput,
-	"wheelReport":     permInput,
-	"setJigglerState": permInput,
+	"keyboardReport":   permInput,
+	"keypressReport":   permInput,
+	"absMouseReport":   permInput,
+	"relMouseReport":   permInput,
+	"setJigglerState":  permInput,
+	"runKeyboardMacro": permInput,
 
 	"startStorageFileUpload": permMedia,
 	"checkMountUrl":          permMedia,
@@ -154,12 +160,17 @@ var apiRPCMethods = map[string]apiPerm{
 	"setATXPowerAction":  permPower,
 	"setDCPowerState":    permPower,
 	"sendWOLMagicPacket": permPower,
+
+	// Another EDID makes the host see another monitor, with a new resolution
+	// and moved windows, and a wrong one blanks the picture.
+	"setEDID": permDisplay,
 }
 
-// /api accepts the login cookie as well, and gin parses a text/plain body as
-// JSON, so a page on another site could send requests that the browser does
-// not preflight. Reject cross-site browser requests; clients that are not
-// browsers send no Origin or Sec-Fetch-Site header and pass.
+// Basic Auth is sent by the browser on its own once a page has asked for it,
+// and gin parses a text/plain body as JSON, so a page on another site could
+// send requests that the browser does not preflight. Reject cross-site browser
+// requests; clients that are not browsers send no Origin or Sec-Fetch-Site
+// header and pass.
 var apiCrossOriginProtection = http.NewCrossOriginProtection()
 
 func apiCrossOriginMiddleware(c *gin.Context) {
@@ -171,10 +182,15 @@ func apiCrossOriginMiddleware(c *gin.Context) {
 }
 
 // apiAuthMiddleware accepts an API token as bearer token or the device
-// password as HTTP Basic Auth (any user name), and otherwise falls back to the
-// login cookie. The password has all permissions, like the login. Failed
-// attempts count against the login rate limit.
-func apiAuthMiddleware() gin.HandlerFunc {
+// password as HTTP Basic Auth (any user name). The password has all
+// permissions, like the login. Failed attempts count against the login rate
+// limit.
+//
+// The login cookie is not an API credential, as the web UI talks to the device
+// over WebRTC. Only routes that a logged-in page fetches itself, such as a
+// screenshot in a browser tab, pass allowCookie and accept it as well. Without
+// a password, the API is open, as the web UI is.
+func apiAuthMiddleware(allowCookie bool) gin.HandlerFunc {
 	cookieAuth := protectedMiddleware()
 	return func(c *gin.Context) {
 		authorization := c.GetHeader("Authorization")
@@ -183,7 +199,11 @@ func apiAuthMiddleware() gin.HandlerFunc {
 		// Without a password the API is open, as the web UI is.
 		isBasic = isBasic && config.LocalAuthMode != "noPassword"
 		if !isBearer && !isBasic {
-			cookieAuth(c)
+			if allowCookie || config.LocalAuthMode == "noPassword" {
+				cookieAuth(c)
+				return
+			}
+			sendErrorJsonThenAbort(c, http.StatusUnauthorized, "Unauthorized")
 			return
 		}
 

@@ -40,6 +40,10 @@ var (
 	videoPipelineRunning bool
 	videoLeaseUntil      time.Time
 	videoLeaseTimer      *time.Timer
+	// videoLeaseTookPauseFrom is the session whose pause the lease took over.
+	// The pause goes back to it when the lease expires, unless the session
+	// resumed or left meanwhile.
+	videoLeaseTookPauseFrom *Session
 )
 
 // errNoVideoSignal reports the capture state when the HDMI input has no picture.
@@ -96,6 +100,7 @@ func acquireVideoLease() (displayWoken bool, err error) {
 			return false, errVideoPaused
 		}
 		nativeLogger.Info().Msg("video lease takes over a pause held by a session")
+		videoLeaseTookPauseFrom = videoPausedBy
 		videoPausedBy = nil
 	}
 
@@ -133,10 +138,18 @@ func expireVideoLease() {
 	videoLeaseTimer = nil
 	videoLeaseActive.Store(false)
 	idle := getActiveSessions() == 0
-	stopped := videoPipelineRunning && idle
-	if stopped {
+	stopped := false
+	handBack := videoLeaseTookPauseFrom
+	videoLeaseTookPauseFrom = nil
+	if handBack != nil && videoPausedBy == nil && !idle {
+		// The session's dialog still expects the pipeline to be down.
+		nativeLogger.Info().Msg("video lease expired, handing the pause back to its session")
+		videoPausedBy = handBack
+		_ = stopVideoPipelineLocked()
+	} else if videoPipelineRunning && idle {
 		nativeLogger.Info().Msg("video lease expired, stopping video")
 		_ = stopVideoPipelineLocked()
+		stopped = true
 	}
 	videoPauseMu.Unlock()
 

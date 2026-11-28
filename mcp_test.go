@@ -33,7 +33,7 @@ func connectMCPTestClientTo(t *testing.T, path string) *mcp.ClientSession {
 	t.Helper()
 	token := setUpAPITest(t)
 	r := newAPITestRouter()
-	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware(false)).Any("/mcp", handleMCP)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 
@@ -103,7 +103,7 @@ func TestMCPToolErrorsReachTheModel(t *testing.T) {
 func TestMCPRequiresAuth(t *testing.T) {
 	setUpAPITest(t)
 	r := newAPITestRouter()
-	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware(false)).Any("/mcp", handleMCP)
 	initialize := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
 
 	if w := doAPIRequest(r, http.MethodPost, "/api/mcp", initialize, "", ""); w.Code != http.StatusUnauthorized {
@@ -344,7 +344,7 @@ func TestMCPScreenWidthParameter(t *testing.T) {
 
 	token := setUpAPITest(t)
 	r := newAPITestRouter()
-	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware(false)).Any("/mcp", handleMCP)
 	w := doAPIRequest(r, http.MethodPost, "/api/mcp?screen_width=huge", "{}", token, "")
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "screen_width") {
 		t.Errorf("invalid screen_width: status %d, %s", w.Code, w.Body.String())
@@ -412,7 +412,7 @@ func TestMCPInputToolsOfferScreenshot(t *testing.T) {
 func connectMCPWithToken(t *testing.T, token string) *mcp.ClientSession {
 	t.Helper()
 	r := newAPITestRouter()
-	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware(false)).Any("/mcp", handleMCP)
 	srv := httptest.NewServer(r)
 	t.Cleanup(srv.Close)
 
@@ -464,7 +464,7 @@ func TestMCPToolsFollowPermissions(t *testing.T) {
 func TestMCPCanBeTurnedOff(t *testing.T) {
 	token := setUpAPITest(t)
 	r := newAPITestRouter()
-	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware()).Any("/mcp", handleMCP)
+	r.Group("/api", apiCrossOriginMiddleware, apiAuthMiddleware(false)).Any("/mcp", handleMCP)
 
 	config.MCPDisabled = true
 	if w := doAPIRequest(r, http.MethodPost, "/api/mcp", `{}`, token, ""); w.Code != http.StatusNotFound {

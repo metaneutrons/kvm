@@ -22,6 +22,8 @@
     "access_api_token_never_used": "Mai utilizzato",
     "access_api_token_new_description": "Copia il token ora. Non verrà mostrato di nuovo.",
     "access_api_token_new_title": "Nuovo token API",
+    "access_api_token_perm_display": "Display",
+    "access_api_token_perm_display_description": "Modifica l'EDID, che imposta il monitor visto dall'host",
     "access_api_token_perm_input": "Input",
     "access_api_token_perm_input_description": "Tastiera, mouse e Jiggler",
     "access_api_token_perm_media": "Media virtuali",
