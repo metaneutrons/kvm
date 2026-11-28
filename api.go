@@ -146,7 +146,6 @@ var apiRPCMethods = map[string]apiPerm{
 	"keypressReport":   permInput,
 	"absMouseReport":   permInput,
 	"relMouseReport":   permInput,
-	"wheelReport":      permInput,
 	"setJigglerState":  permInput,
 	"runKeyboardMacro": permInput,
 

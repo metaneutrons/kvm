@@ -23,6 +23,9 @@ import (
 
 func TestAPIRPCMethodsExistAndNeedNoSession(t *testing.T) {
 	sessionType := reflect.TypeOf((*Session)(nil))
+	// Handlers that take a *Session and run without one, as they do for MQTT
+	// and MCP: rpcExecuteKeyboardMacro and Session.input accept nil.
+	nilSessionOK := map[string]bool{"runKeyboardMacro": true}
 	for method := range apiRPCMethods {
 		handler, ok := rpcHandlers[method]
 		if !ok {
@@ -30,7 +33,7 @@ func TestAPIRPCMethodsExistAndNeedNoSession(t *testing.T) {
 			continue
 		}
 		fn := reflect.TypeOf(handler.Func)
-		if fn.NumIn() > 0 && fn.In(0) == sessionType {
+		if fn.NumIn() > 0 && fn.In(0) == sessionType && !nilSessionOK[method] {
 			t.Errorf("%s needs a WebRTC session, which an API call does not have", method)
 		}
 	}
@@ -306,7 +309,7 @@ func TestAPITokenPermissions(t *testing.T) {
 		{[]string{"view"}, []string{"keypressReport", "runKeyboardMacro", "setJigglerState", "mountWithHTTP", "setATXPowerAction", "wakeHost", "setEDID"}},
 		{[]string{"input"}, []string{"mountWithHTTP", "unmountImage", "setATXPowerAction", "sendWOLMagicPacket", "wakeHost", "setEDID"}},
 		{[]string{"media"}, []string{"keypressReport", "runKeyboardMacro", "absMouseReport", "setDCPowerState", "setEDID"}},
-		{[]string{"power"}, []string{"keyboardReport", "runKeyboardMacro", "wheelReport", "mountWithStorage", "setEDID"}},
+		{[]string{"power"}, []string{"keyboardReport", "runKeyboardMacro", "absMouseReport", "mountWithStorage", "setEDID"}},
 		{[]string{"display"}, []string{"keyboardReport", "runKeyboardMacro", "mountWithHTTP", "setATXPowerAction", "wakeHost"}},
 	}
 	for _, tt := range tests {
