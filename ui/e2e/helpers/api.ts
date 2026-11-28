@@ -88,6 +88,8 @@ export async function setMcpEnabled(page: Page, enabled: boolean): Promise<void>
 export interface RpcError {
   code: number;
   message: string;
+  /** The handler's own error text, set for -32603. */
+  data?: unknown;
 }
 
 export interface RpcResponse {

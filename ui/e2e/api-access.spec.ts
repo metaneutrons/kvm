@@ -127,7 +127,7 @@ test.describe("API access", () => {
 
     const allowed = await apiRpc(bearer(input.token), "runKeyboardMacro", { macro: unknown });
     expect(allowed.error?.code).not.toBe(NO_PERMISSION);
-    expect(allowed.error?.message).toContain("unknown keyboard macro");
+    expect(String(allowed.error?.data)).toContain("unknown keyboard macro");
 
     const refused = await apiRpc(bearer(media.token), "runKeyboardMacro", { macro: unknown });
     expect(refused.error?.code).toBe(NO_PERMISSION);
