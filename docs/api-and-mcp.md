@@ -241,8 +241,9 @@ curl -H "Authorization: Bearer jkvm_…" -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"getVideoState"}' https://<your-jetkvm>/api/rpc
 ```
 
-Allowed are state queries, keyboard and mouse input, virtual media, Wake-on-LAN
-and power. Device administration (network, updates, SSH keys, developer mode,
+Allowed are state queries, keyboard and mouse input, running a stored keyboard
+macro with `runKeyboardMacro` (Input; a token can run macros but not read or
+change them), virtual media, Wake-on-LAN and power. Device administration (network, updates, SSH keys, developer mode,
 factory reset) is left to the web UI, so a leaked token cannot take over the
 JetKVM itself.
 

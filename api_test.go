@@ -303,11 +303,11 @@ func TestAPITokenPermissions(t *testing.T) {
 		perms  []string
 		denied []string
 	}{
-		{[]string{"view"}, []string{"keypressReport", "setJigglerState", "mountWithHTTP", "setATXPowerAction", "wakeHost", "setEDID"}},
+		{[]string{"view"}, []string{"keypressReport", "runKeyboardMacro", "setJigglerState", "mountWithHTTP", "setATXPowerAction", "wakeHost", "setEDID"}},
 		{[]string{"input"}, []string{"mountWithHTTP", "unmountImage", "setATXPowerAction", "sendWOLMagicPacket", "wakeHost", "setEDID"}},
-		{[]string{"media"}, []string{"keypressReport", "absMouseReport", "setDCPowerState", "setEDID"}},
-		{[]string{"power"}, []string{"keyboardReport", "wheelReport", "mountWithStorage", "setEDID"}},
-		{[]string{"display"}, []string{"keyboardReport", "mountWithHTTP", "setATXPowerAction", "wakeHost"}},
+		{[]string{"media"}, []string{"keypressReport", "runKeyboardMacro", "absMouseReport", "setDCPowerState", "setEDID"}},
+		{[]string{"power"}, []string{"keyboardReport", "runKeyboardMacro", "wheelReport", "mountWithStorage", "setEDID"}},
+		{[]string{"display"}, []string{"keyboardReport", "runKeyboardMacro", "mountWithHTTP", "setATXPowerAction", "wakeHost"}},
 	}
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.perms, "+"), func(t *testing.T) {

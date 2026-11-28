@@ -69,11 +69,23 @@ test.describe("API access", () => {
     // Only requests that must be refused are sent with a limited token: an
     // allowed one would act on the host.
     const cases: { permissions: string[]; refused: string[] }[] = [
-      { permissions: [], refused: ["keypressReport", "mountWithHTTP", "setEDID"] },
+      {
+        permissions: [],
+        refused: ["keypressReport", "runKeyboardMacro", "mountWithHTTP", "setEDID"],
+      },
       { permissions: ["input"], refused: ["mountWithHTTP", "wakeHost", "setEDID"] },
-      { permissions: ["media"], refused: ["keypressReport", "setDCPowerState", "setEDID"] },
-      { permissions: ["power"], refused: ["keyboardReport", "mountWithStorage", "setEDID"] },
-      { permissions: ["display"], refused: ["keyboardReport", "mountWithStorage", "wakeHost"] },
+      {
+        permissions: ["media"],
+        refused: ["keypressReport", "runKeyboardMacro", "setDCPowerState", "setEDID"],
+      },
+      {
+        permissions: ["power"],
+        refused: ["keyboardReport", "runKeyboardMacro", "mountWithStorage", "setEDID"],
+      },
+      {
+        permissions: ["display"],
+        refused: ["keyboardReport", "runKeyboardMacro", "mountWithStorage", "wakeHost"],
+      },
     ];
     for (const { permissions, refused } of cases) {
       const { token } = await createApiToken(page, {
@@ -98,6 +110,31 @@ test.describe("API access", () => {
         expect(res.error?.code, method).toBe(METHOD_NOT_FOUND);
       }
     }
+  });
+
+  test("an input token may run a stored macro, other tokens may not", async ({ page }) => {
+    // A name that no macro has: the call passes the permission check and then
+    // fails on the lookup, so nothing is typed on the host.
+    const unknown = "e2e-no-such-macro";
+    const input = await createApiToken(page, {
+      name: `${TEST_TOKEN_PREFIX}macro-input`,
+      permissions: ["input"],
+    });
+    const media = await createApiToken(page, {
+      name: `${TEST_TOKEN_PREFIX}macro-media`,
+      permissions: ["media"],
+    });
+
+    const allowed = await apiRpc(bearer(input.token), "runKeyboardMacro", { macro: unknown });
+    expect(allowed.error?.code).not.toBe(NO_PERMISSION);
+    expect(allowed.error?.message).toContain("unknown keyboard macro");
+
+    const refused = await apiRpc(bearer(media.token), "runKeyboardMacro", { macro: unknown });
+    expect(refused.error?.code).toBe(NO_PERMISSION);
+
+    // Macros can hold typed credentials, so a token cannot read them.
+    const read = await apiRpc(bearer(input.token), "getKeyboardMacros");
+    expect(read.error?.code).toBe(METHOD_NOT_FOUND);
   });
 
   test("the display permission lets a token set the EDID", async ({ page }) => {
